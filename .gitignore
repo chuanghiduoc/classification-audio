@@ -3,3 +3,4 @@ data/
 feature_analysis/
 *.pth
 *.joblib
+cache/
