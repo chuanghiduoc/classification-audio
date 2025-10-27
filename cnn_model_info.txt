@@ -1,35 +1,48 @@
 
-MODEL: CNN for Audio Classification (PyTorch)
-Dataset: ESC-50 (50 classes, 2000 samples)
-Input: Mel Spectrogram (128x128)
-Data Augmentation: YES (6x)
-Device: cuda
+═══════════════════════════════════════════════════════════════════════
+CNN MODEL FOR AUDIO CLASSIFICATION (PyTorch)
+═══════════════════════════════════════════════════════════════════════
+
+DATASET:
+  - ESC-50: 2000 samples, 50 classes
+  - Input: Mel Spectrogram (128x128)
+  - Split: Train 7680 | Val 320 | Test 400
+  - Augmentation: YES (6x for training only)
+  - Device: cuda
+
+MODEL ARCHITECTURE:
+  - Type: Custom CNN (4 conv blocks + 3 FC layers)
+  - Parameters: 1,279,506
+  - Regularization: Dropout (0.2-0.4) + BatchNorm + L2 (1e-4)
 
 TRAINING:
-- Train samples: 7680
-- Val samples: 1920
-- Test samples: 2400
-- Epochs trained: 100
-- Best epoch: 99
-- Batch size: 32
-- Optimizer: Adam (lr=0.001)
-- Trainable parameters: 1,449,426
+  - Epochs: 100 / 100
+  - Best epoch: 87
+  - Batch size: 32
+  - Optimizer: Adam (lr=0.001, weight_decay=1e-4)
+  - LR Scheduler: ReduceLROnPlateau
+  - Early stopping: patience=20
 
 RESULTS:
-- Test Accuracy: 0.9862 (98.62%)
-- Best Val Accuracy: 98.80%
-- Improvement over SVM: +29.34%
+  - Train Accuracy: 89.43%
+  - Val Accuracy: 83.44%
+  - Test Accuracy: 0.8100 (81.00%)
+  - Baseline (SVM): 76.25%
+  - Improvement: +6.23%
 
-FILES:
-- best_cnn_model.pth (trained model)
-- confusion_matrix_CNN.png
-- training_history_CNN.png
-- predictions_CNN.png
-- cnn_model_info.txt
+OUTPUT FILES:
+  ✓ best_cnn_improved_model.pth (trained weights)
+  ✓ confusion_matrix_CNN_improved.png
+  ✓ training_history_CNN_improved.png
+  ✓ predictions_CNN.png
+  ✓ cnn_model_info.txt
 
 USAGE:
-1. Cài đặt: pip install torch torchvision torchaudio opencv-python
-2. Training: python cnn_model.py
-3. Load model: 
-   model = AudioCNN(num_classes=50)
-   model.load_state_dict(torch.load('best_cnn_model.pth'))
+  from cnn_model import AudioCNN
+  import torch
+  
+  model = AudioCNN(num_classes=50)
+  model.load_state_dict(torch.load('best_cnn_improved_model.pth'))
+  model.eval()
+
+═══════════════════════════════════════════════════════════════════════

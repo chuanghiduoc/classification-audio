@@ -1,0 +1,53 @@
+
+═══════════════════════════════════════════════════════════════════════
+RESNET18 TRANSFER LEARNING FOR AUDIO CLASSIFICATION
+═══════════════════════════════════════════════════════════════════════
+
+DATASET:
+  - ESC-50: 8400 samples, 50 classes
+  - Train: 7680 samples (augmented)
+  - Val: 320 samples
+  - Test: 400 samples
+  - SpecAugment: ENABLED for training
+
+MODEL:
+  - Architecture: ResNet18 (pretrained on ImageNet)
+  - Total parameters: 11,202,162
+  - Trainable parameters: 11,202,162
+  - Input: Mel Spectrogram (128x128) converted to 3-channel RGB
+  - Dropout: 0.5
+
+TRAINING STRATEGY:
+  - Stage 1: FC layer only (20 epochs)
+    Best Val Acc: 39.69%
+  
+  - Stage 2: Full fine-tuning (33 epochs)
+    Best Val Acc: 86.56%
+  
+  - Total epochs: 53
+  - Optimizer: Adam (Stage 1: lr=0.001, Stage 2: lr=0.0001)
+  - Scheduler: ReduceLROnPlateau
+  - Early stopping: patience=15
+
+RESULTS:
+  - Train Accuracy: 98.75%
+  - Val Accuracy: 86.56%
+  - Test Accuracy: 86.50%
+  - Improvement vs SVM: +13.44%
+  - Improvement vs CNN: +7.79%
+
+FILES:
+  ✓ best_resnet18_model.pth
+  ✓ confusion_matrix_ResNet18.png
+  ✓ training_history_ResNet18.png
+  ✓ resnet_model_info.txt
+
+USAGE:
+  from resnet_model import AudioResNet18
+  import torch
+  
+  model = AudioResNet18(num_classes=50, pretrained=False)
+  model.load_state_dict(torch.load('best_resnet18_model.pth'))
+  model.eval()
+
+═══════════════════════════════════════════════════════════════════════

@@ -25,11 +25,15 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import torch.backends.cudnn as cudnn
 
-# Cấu hình
+# =============================================================================
+# CẤU HÌNH
+# =============================================================================
+
 DATA_PATH = 'data/audio/audio/'
 CSV_PATH = 'data/esc50.csv'
 IMG_SIZE = 128
-APPLY_AUGMENTATION = True  # Bật/tắt data augmentation
+APPLY_AUGMENTATION = True  # Data augmentation (time/pitch shift, noise)
+APPLY_SPECAUGMENT = True   # SpecAugment (frequency/time masking)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 print("="*70)
@@ -41,6 +45,70 @@ if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
 else:
     print("GPU: Not available (using CPU)")
+
+# =============================================================================
+# SPECAUGMENT - FREQUENCY & TIME MASKING
+# =============================================================================
+
+class SpecAugment:
+    """
+    SpecAugment: A Simple Data Augmentation Method for ASR (Google Research)
+    https://arxiv.org/abs/1904.08779
+    
+    Applies random masking to frequency and time dimensions of mel spectrogram.
+    This helps reduce overfitting and improve generalization.
+    """
+    def __init__(self, freq_mask_param=20, time_mask_param=20, n_freq_masks=2, n_time_masks=2):
+        """
+        Args:
+            freq_mask_param: Maximum width of frequency mask
+            time_mask_param: Maximum width of time mask
+            n_freq_masks: Number of frequency masks to apply
+            n_time_masks: Number of time masks to apply
+        """
+        self.freq_mask_param = freq_mask_param
+        self.time_mask_param = time_mask_param
+        self.n_freq_masks = n_freq_masks
+        self.n_time_masks = n_time_masks
+    
+    def __call__(self, spec):
+        """
+        Apply SpecAugment to mel spectrogram
+        
+        Args:
+            spec: Mel spectrogram array (H, W) or (C, H, W)
+            
+        Returns:
+            Augmented mel spectrogram
+        """
+        spec = spec.copy()
+        
+        # Handle both (H, W) and (C, H, W) formats
+        if len(spec.shape) == 3:
+            spec = spec.squeeze(0)  # Remove channel dim if present
+            had_channel = True
+        else:
+            had_channel = False
+        
+        num_freq_bins, num_time_frames = spec.shape
+        
+        # Frequency masking
+        for _ in range(self.n_freq_masks):
+            f = np.random.randint(0, self.freq_mask_param)
+            f0 = np.random.randint(0, num_freq_bins - f)
+            spec[f0:f0 + f, :] = 0
+        
+        # Time masking
+        for _ in range(self.n_time_masks):
+            t = np.random.randint(0, self.time_mask_param)
+            t0 = np.random.randint(0, num_time_frames - t)
+            spec[:, t0:t0 + t] = 0
+        
+        # Restore channel dimension if needed
+        if had_channel:
+            spec = np.expand_dims(spec, axis=0)
+        
+        return spec
 
 # =============================================================================
 # HÀM TRÍCH XUẤT MEL SPECTROGRAM
@@ -130,7 +198,7 @@ def create_mel_spectrogram(y, sr, img_size):
     return mel_spec_resized
 
 # =============================================================================
-# ĐỌC DỮ LIỆU
+# ĐỌC DỮ LIỆU - CHIA TRAIN/VAL/TEST TRƯỚC KHI AUGMENT
 # =============================================================================
 
 print("\n" + "="*70)
@@ -140,101 +208,164 @@ print("="*70)
 df = pd.read_csv(CSV_PATH)
 print(f"Dataset: {len(df)} samples, {df['target'].nunique()} classes")
 
-# Trích xuất spectrograms
-file_paths = [os.path.join(DATA_PATH, row['filename']) for _, row in df.iterrows()]
-labels = df['target'].values
+# BƯỚC 1: Chia Train/Test trước (80/20)
+train_val_df, test_df = train_test_split(
+    df, test_size=0.2, random_state=42, stratify=df['target']
+)
 
-spectrograms = []
-labels_expanded = []
+# BƯỚC 2: Chia Train/Val từ phần train_val (80/20 của 80% = 64% train, 16% val)
+train_df, val_df = train_test_split(
+    train_val_df, test_size=0.2, random_state=42, stratify=train_val_df['target']
+)
 
-print(f"\nDang xu ly {len(file_paths)} files...")
+print(f"\n=> Split:")
+print(f"   Train: {len(train_df)} files ({len(train_df)/len(df)*100:.1f}%)")
+print(f"   Val:   {len(val_df)} files ({len(val_df)/len(df)*100:.1f}%)")
+print(f"   Test:  {len(test_df)} files ({len(test_df)/len(df)*100:.1f}%)")
+
+# BƯỚC 3: Xử lý TRAINING set (có augmentation)
+print(f"\n[1/3] Xu ly TRAIN set ({len(train_df)} files)...")
 if APPLY_AUGMENTATION:
-    print("Data Augmentation: BAT (6x augmentation)")
-else:
-    print("Data Augmentation: TAT")
+    print("      Augmentation: BAT (6x)")
 
-for idx, (file_path, label) in enumerate(zip(file_paths, labels)):
-    if (idx + 1) % 200 == 0:
-        print(f"  Da xu ly: {idx + 1}/{len(file_paths)}")
+train_spectrograms = []
+train_labels = []
+
+for idx, row in tqdm(train_df.iterrows(), total=len(train_df), desc="Train"):
+    file_path = os.path.join(DATA_PATH, row['filename'])
+    label = row['target']
     
     result = extract_mel_spectrogram(file_path, IMG_SIZE, augment=APPLY_AUGMENTATION)
     
     if result is not None:
         if APPLY_AUGMENTATION:
-            # result là list of spectrograms
             for spec in result:
-                spectrograms.append(spec)
-                labels_expanded.append(label)
+                train_spectrograms.append(spec)
+                train_labels.append(label)
         else:
-            # result là 1 spectrogram
-            spectrograms.append(result)
-            labels_expanded.append(label)
+            train_spectrograms.append(result)
+            train_labels.append(label)
 
-spectrograms = np.array(spectrograms)
-labels_expanded = np.array(labels_expanded)
+# BƯỚC 4: Xử lý VALIDATION set (KHÔNG augmentation)
+print(f"\n[2/3] Xu ly VAL set ({len(val_df)} files)...")
+print("      Augmentation: TAT")
 
-print(f"\n=> Thanh cong!")
-print(f"   Spectrograms shape: {spectrograms.shape}")
-print(f"   Labels shape: {labels_expanded.shape}")
+val_spectrograms = []
+val_labels = []
 
-if APPLY_AUGMENTATION:
-    print(f"   Augmentation: {len(file_paths)} -> {len(spectrograms)} samples ({len(spectrograms)//len(file_paths)}x)")
+for idx, row in tqdm(val_df.iterrows(), total=len(val_df), desc="Val"):
+    file_path = os.path.join(DATA_PATH, row['filename'])
+    label = row['target']
+    
+    result = extract_mel_spectrogram(file_path, IMG_SIZE, augment=False)
+    
+    if result is not None:
+        val_spectrograms.append(result)
+        val_labels.append(label)
 
-# PyTorch: (samples, channels, height, width)
-X = spectrograms.reshape(-1, 1, IMG_SIZE, IMG_SIZE)
-y = labels_expanded
+# BƯỚC 5: Xử lý TEST set (KHÔNG augmentation)
+print(f"\n[3/3] Xu ly TEST set ({len(test_df)} files)...")
+print("      Augmentation: TAT")
 
-print(f"\n=> Input shape: {X.shape}")
-print(f"   Output shape: {y.shape}")
+test_spectrograms = []
+test_labels = []
+
+for idx, row in tqdm(test_df.iterrows(), total=len(test_df), desc="Test"):
+    file_path = os.path.join(DATA_PATH, row['filename'])
+    label = row['target']
+    
+    result = extract_mel_spectrogram(file_path, IMG_SIZE, augment=False)
+    
+    if result is not None:
+        test_spectrograms.append(result)
+        test_labels.append(label)
+
+# Convert to numpy arrays
+train_spectrograms = np.array(train_spectrograms)
+train_labels = np.array(train_labels)
+val_spectrograms = np.array(val_spectrograms)
+val_labels = np.array(val_labels)
+test_spectrograms = np.array(test_spectrograms)
+test_labels = np.array(test_labels)
+
+print(f"\n=> KET QUA:")
+print(f"   Train: {train_spectrograms.shape[0]} samples" + (f" (augmented {len(train_df)}x6)" if APPLY_AUGMENTATION else ""))
+print(f"   Val:   {val_spectrograms.shape[0]} samples (clean)")
+print(f"   Test:  {test_spectrograms.shape[0]} samples (clean)")
+
+# PyTorch format: (samples, channels, height, width)
+X_train = train_spectrograms.reshape(-1, 1, IMG_SIZE, IMG_SIZE)
+y_train = train_labels
+X_val = val_spectrograms.reshape(-1, 1, IMG_SIZE, IMG_SIZE)
+y_val = val_labels
+X_test = test_spectrograms.reshape(-1, 1, IMG_SIZE, IMG_SIZE)
+y_test = test_labels
 
 # =============================================================================
-# TRAIN/TEST SPLIT
-# =============================================================================
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
-)
-
-print(f"\n=> Train: {X_train.shape[0]} samples")
-print(f"   Test:  {X_test.shape[0]} samples")
-
-# =============================================================================
-# PYTORCH DATASET
+# PYTORCH DATASET & DATALOADER
 # =============================================================================
 
 class AudioDataset(Dataset):
-    """PyTorch Dataset cho audio spectrograms"""
-    def __init__(self, spectrograms, labels):
-        self.spectrograms = torch.FloatTensor(spectrograms)
+    """
+    PyTorch Dataset for audio spectrograms with SpecAugment support
+    
+    Args:
+        spectrograms: Numpy array of mel spectrograms
+        labels: Numpy array of labels
+        apply_specaugment: Whether to apply SpecAugment (only for training)
+    """
+    def __init__(self, spectrograms, labels, apply_specaugment=False):
+        self.spectrograms = spectrograms  # Keep as numpy for augmentation
         self.labels = torch.LongTensor(labels)
+        self.apply_specaugment = apply_specaugment
+        
+        # Initialize SpecAugment if needed
+        if apply_specaugment:
+            self.spec_augment = SpecAugment(
+                freq_mask_param=20,  # Max frequency mask width
+                time_mask_param=20,  # Max time mask width
+                n_freq_masks=2,      # Number of frequency masks
+                n_time_masks=2       # Number of time masks
+            )
     
     def __len__(self):
         return len(self.labels)
     
     def __getitem__(self, idx):
-        return self.spectrograms[idx], self.labels[idx]
+        spec = self.spectrograms[idx].copy()
+        label = self.labels[idx]
+        
+        # Apply SpecAugment during training
+        if self.apply_specaugment:
+            spec = self.spec_augment(spec)
+        
+        # Convert to tensor
+        spec = torch.FloatTensor(spec)
+        
+        return spec, label
 
-# Create datasets
-train_dataset = AudioDataset(X_train, y_train)
-test_dataset = AudioDataset(X_test, y_test)
+# Create datasets with SpecAugment
+train_dataset = AudioDataset(X_train, y_train, apply_specaugment=APPLY_SPECAUGMENT)
+val_dataset = AudioDataset(X_val, y_val, apply_specaugment=False)  # No augment for val
+test_dataset = AudioDataset(X_test, y_test, apply_specaugment=False)  # No augment for test
 
 # Create dataloaders
 BATCH_SIZE = 32
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
-# Validation split
-train_size = int(0.8 * len(train_dataset))
-val_size = len(train_dataset) - train_size
-train_subset, val_subset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
+print(f"\n=> DataLoaders:")
+print(f"   Train: {len(train_loader)} batches ({len(train_dataset)} samples)")
+print(f"   Val:   {len(val_loader)} batches ({len(val_dataset)} samples)")
+print(f"   Test:  {len(test_loader)} batches ({len(test_dataset)} samples)")
 
-train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
-val_loader = DataLoader(val_subset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
-
-print(f"\n=> DataLoaders created")
-print(f"   Train batches: {len(train_loader)}")
-print(f"   Val batches: {len(val_loader)}")
-print(f"   Test batches: {len(test_loader)}")
+if APPLY_SPECAUGMENT:
+    print(f"\n=> SpecAugment: ENABLED for training")
+    print(f"   - Frequency masks: 2 (max width: 20 bins)")
+    print(f"   - Time masks: 2 (max width: 20 frames)")
+else:
+    print(f"\n=> SpecAugment: DISABLED")
 
 # =============================================================================
 # XÂY DỰNG CNN MODEL (PyTorch)
@@ -246,15 +377,15 @@ print("="*70)
 
 class AudioCNN(nn.Module):
     """
-    CNN Architecture cho Audio Classification
+    CNN Architecture cho Audio Classification (IMPROVED VERSION)
     
     Architecture:
-        Conv2D(32) -> Conv2D(32) -> MaxPool -> BatchNorm -> Dropout
-        Conv2D(64) -> Conv2D(64) -> MaxPool -> BatchNorm -> Dropout
-        Conv2D(128) -> Conv2D(128) -> MaxPool -> BatchNorm -> Dropout
-        Conv2D(256) -> Conv2D(256) -> AdaptiveAvgPool
-        FC(512) -> BatchNorm -> Dropout
-        FC(256) -> BatchNorm -> Dropout
+        Conv2D(32) -> BN -> ReLU -> Conv2D(32) -> BN -> ReLU -> MaxPool -> Dropout
+        Conv2D(64) -> BN -> ReLU -> Conv2D(64) -> BN -> ReLU -> MaxPool -> Dropout
+        Conv2D(128) -> BN -> ReLU -> Conv2D(128) -> BN -> ReLU -> MaxPool -> Dropout
+        Conv2D(256) -> BN -> ReLU -> Conv2D(256) -> BN -> ReLU -> AdaptiveAvgPool
+        FC(512) -> BatchNorm -> ReLU -> Dropout
+        FC(256) -> BatchNorm -> ReLU -> Dropout
         FC(50)
     """
     def __init__(self, num_classes=50):
@@ -262,78 +393,101 @@ class AudioCNN(nn.Module):
         
         # Block 1
         self.conv1_1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+        self.bn1_1 = nn.BatchNorm2d(32)
         self.conv1_2 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(32)
+        self.bn1_2 = nn.BatchNorm2d(32)
         self.pool1 = nn.MaxPool2d(2, 2)
-        self.dropout1 = nn.Dropout2d(0.25)
+        self.dropout1 = nn.Dropout2d(0.2)
         
         # Block 2
         self.conv2_1 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2_1 = nn.BatchNorm2d(64)
         self.conv2_2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
+        self.bn2_2 = nn.BatchNorm2d(64)
         self.pool2 = nn.MaxPool2d(2, 2)
-        self.dropout2 = nn.Dropout2d(0.25)
+        self.dropout2 = nn.Dropout2d(0.2)
         
         # Block 3
         self.conv3_1 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.bn3_1 = nn.BatchNorm2d(128)
         self.conv3_2 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(128)
+        self.bn3_2 = nn.BatchNorm2d(128)
         self.pool3 = nn.MaxPool2d(2, 2)
-        self.dropout3 = nn.Dropout2d(0.25)
+        self.dropout3 = nn.Dropout2d(0.3)
         
         # Block 4
         self.conv4_1 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
+        self.bn4_1 = nn.BatchNorm2d(256)
         self.conv4_2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.bn4_2 = nn.BatchNorm2d(256)
         self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.dropout4 = nn.Dropout2d(0.3)
         
         # Fully connected layers
-        self.fc1 = nn.Linear(256, 512)
-        self.bn_fc1 = nn.BatchNorm1d(512)
-        self.dropout_fc1 = nn.Dropout(0.5)
+        self.fc1 = nn.Linear(256, 256)
+        self.bn_fc1 = nn.BatchNorm1d(256)
+        self.dropout_fc1 = nn.Dropout(0.4)
         
-        self.fc2 = nn.Linear(512, 256)
-        self.bn_fc2 = nn.BatchNorm1d(256)
+        self.fc2 = nn.Linear(256, 128)
+        self.bn_fc2 = nn.BatchNorm1d(128)
         self.dropout_fc2 = nn.Dropout(0.3)
         
-        self.fc3 = nn.Linear(256, num_classes)
+        self.fc3 = nn.Linear(128, num_classes)
+        
+        # Weight initialization
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights using He initialization for ReLU"""
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm1d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, 0, 0.01)
+                nn.init.constant_(m.bias, 0)
     
     def forward(self, x):
         # Block 1
-        x = F.relu(self.conv1_1(x))
-        x = F.relu(self.conv1_2(x))
+        x = F.relu(self.bn1_1(self.conv1_1(x)))
+        x = F.relu(self.bn1_2(self.conv1_2(x)))
         x = self.pool1(x)
-        x = self.bn1(x)
         x = self.dropout1(x)
         
         # Block 2
-        x = F.relu(self.conv2_1(x))
-        x = F.relu(self.conv2_2(x))
+        x = F.relu(self.bn2_1(self.conv2_1(x)))
+        x = F.relu(self.bn2_2(self.conv2_2(x)))
         x = self.pool2(x)
-        x = self.bn2(x)
         x = self.dropout2(x)
         
         # Block 3
-        x = F.relu(self.conv3_1(x))
-        x = F.relu(self.conv3_2(x))
+        x = F.relu(self.bn3_1(self.conv3_1(x)))
+        x = F.relu(self.bn3_2(self.conv3_2(x)))
         x = self.pool3(x)
-        x = self.bn3(x)
         x = self.dropout3(x)
         
         # Block 4
-        x = F.relu(self.conv4_1(x))
-        x = F.relu(self.conv4_2(x))
+        x = F.relu(self.bn4_1(self.conv4_1(x)))
+        x = F.relu(self.bn4_2(self.conv4_2(x)))
         x = self.adaptive_pool(x)
+        x = self.dropout4(x)
         
         # Flatten
         x = x.view(x.size(0), -1)
         
         # FC layers
-        x = F.relu(self.fc1(x))
+        x = self.fc1(x)
         x = self.bn_fc1(x)
+        x = F.relu(x)
         x = self.dropout_fc1(x)
         
-        x = F.relu(self.fc2(x))
+        x = self.fc2(x)
         x = self.bn_fc2(x)
+        x = F.relu(x)
         x = self.dropout_fc2(x)
         
         x = self.fc3(x)
@@ -353,8 +507,8 @@ print(f"\nTrainable parameters: {count_parameters(model):,}")
 
 # Loss and optimizer
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)  # L2 regularization
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
 
 # =============================================================================
 # TRAINING FUNCTIONS
@@ -375,6 +529,7 @@ def train_epoch(model, loader, criterion, optimizer, device):
         outputs = model(inputs)
         loss = criterion(outputs, labels)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
         optimizer.step()
         
         running_loss += loss.item()
@@ -416,7 +571,8 @@ print("="*70)
 
 EPOCHS = 100
 best_val_acc = 0
-patience = 15
+best_val_loss = float('inf')
+patience = 20
 patience_counter = 0
 
 train_losses = []
@@ -424,10 +580,12 @@ train_accs = []
 val_losses = []
 val_accs = []
 
-print(f"\nEpochs: {EPOCHS}")
-print(f"Batch size: {BATCH_SIZE}")
-print(f"Optimizer: Adam (lr=0.001)")
-print(f"Early stopping patience: {patience}")
+print(f"\nHyperparameters:")
+print(f"  - Epochs: {EPOCHS}")
+print(f"  - Batch size: {BATCH_SIZE}")
+print(f"  - Optimizer: Adam (lr=0.001, weight_decay=1e-4)")
+print(f"  - Early stopping patience: {patience}")
+print(f"  - LR scheduler: ReduceLROnPlateau (factor=0.5, patience=10)")
 
 for epoch in range(EPOCHS):
     print(f"\nEpoch {epoch+1}/{EPOCHS}")
@@ -460,7 +618,7 @@ for epoch in range(EPOCHS):
     # Save best model
     if val_acc > best_val_acc:
         best_val_acc = val_acc
-        torch.save(model.state_dict(), 'best_cnn_model.pth')
+        torch.save(model.state_dict(), 'best_cnn_improved_model.pth')
         print(f"✓ Model saved! (Val Acc: {val_acc:.2f}%)")
         patience_counter = 0
     else:
@@ -483,7 +641,7 @@ print("DANH GIA MODEL")
 print("="*70)
 
 # Load best model
-model.load_state_dict(torch.load('best_cnn_model.pth'))
+model.load_state_dict(torch.load('best_cnn_improved_model.pth'))
 model.eval()
 
 # Predict on test set
@@ -519,9 +677,9 @@ plt.title(f'Confusion Matrix - CNN Model (Accuracy: {accuracy:.2%})')
 plt.ylabel('True Label')
 plt.xlabel('Predicted Label')
 plt.tight_layout()
-plt.savefig('confusion_matrix_CNN.png', dpi=300)
+plt.savefig('confusion_matrix_CNN_improved.png', dpi=300)
 plt.close()
-print("\n=> Da luu: confusion_matrix_CNN.png")
+print("\n=> Da luu: confusion_matrix_CNN_improved.png")
 
 # =============================================================================
 # TRAINING HISTORY
@@ -554,9 +712,9 @@ plt.legend(fontsize=10)
 plt.grid(True, alpha=0.3)
 
 plt.tight_layout()
-plt.savefig('training_history_CNN.png', dpi=300)
+plt.savefig('training_history_CNN_improved.png', dpi=300)
 plt.close()
-print("=> Da luu: training_history_CNN.png")
+print("=> Da luu: training_history_CNN_improved.png")
 
 # Best epoch info
 best_epoch_idx = np.argmax(val_accs)
@@ -643,40 +801,53 @@ print("HOAN TAT!")
 print("="*70)
 
 model_info = f"""
-MODEL: CNN for Audio Classification (PyTorch)
-Dataset: ESC-50 (50 classes, {len(df)} samples)
-Input: Mel Spectrogram ({IMG_SIZE}x{IMG_SIZE})
-Data Augmentation: {'YES (6x)' if APPLY_AUGMENTATION else 'NO'}
-Device: {DEVICE}
+═══════════════════════════════════════════════════════════════════════
+CNN MODEL FOR AUDIO CLASSIFICATION (PyTorch)
+═══════════════════════════════════════════════════════════════════════
+
+DATASET:
+  - ESC-50: {len(df)} samples, 50 classes
+  - Input: Mel Spectrogram ({IMG_SIZE}x{IMG_SIZE})
+  - Split: Train {len(train_dataset)} | Val {len(val_dataset)} | Test {len(test_dataset)}
+  - Augmentation: {'YES (6x for training only)' if APPLY_AUGMENTATION else 'NO'}
+  - Device: {DEVICE}
+
+MODEL ARCHITECTURE:
+  - Type: Custom CNN (4 conv blocks + 3 FC layers)
+  - Parameters: {trainable_params:,}
+  - Regularization: Dropout (0.2-0.4) + BatchNorm + L2 (1e-4)
 
 TRAINING:
-- Train samples: {len(train_subset)}
-- Val samples: {len(val_subset)}
-- Test samples: {len(test_dataset)}
-- Epochs trained: {len(train_losses)}
-- Best epoch: {best_epoch_idx + 1}
-- Batch size: {BATCH_SIZE}
-- Optimizer: Adam (lr=0.001)
-- Trainable parameters: {trainable_params:,}
+  - Epochs: {len(train_losses)} / {EPOCHS}
+  - Best epoch: {best_epoch_idx + 1}
+  - Batch size: {BATCH_SIZE}
+  - Optimizer: Adam (lr=0.001, weight_decay=1e-4)
+  - LR Scheduler: ReduceLROnPlateau
+  - Early stopping: patience={patience}
 
 RESULTS:
-- Test Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)
-- Best Val Accuracy: {best_val_acc:.2f}%
-- Improvement over SVM: +{improvement:.2f}%
+  - Train Accuracy: {train_accs[best_epoch_idx]:.2f}%
+  - Val Accuracy: {best_val_acc:.2f}%
+  - Test Accuracy: {accuracy:.4f} ({accuracy*100:.2f}%)
+  - Baseline (SVM): 76.25%
+  - Improvement: {improvement:+.2f}%
 
-FILES:
-- best_cnn_model.pth (trained model)
-- confusion_matrix_CNN.png
-- training_history_CNN.png
-- predictions_CNN.png
-- cnn_model_info.txt
+OUTPUT FILES:
+  ✓ best_cnn_improved_model.pth (trained weights)
+  ✓ confusion_matrix_CNN_improved.png
+  ✓ training_history_CNN_improved.png
+  ✓ predictions_CNN.png
+  ✓ cnn_model_info.txt
 
 USAGE:
-1. Cài đặt: pip install torch torchvision torchaudio opencv-python
-2. Training: python cnn_model.py
-3. Load model: 
-   model = AudioCNN(num_classes=50)
-   model.load_state_dict(torch.load('best_cnn_model.pth'))
+  from cnn_model import AudioCNN
+  import torch
+  
+  model = AudioCNN(num_classes=50)
+  model.load_state_dict(torch.load('best_cnn_improved_model.pth'))
+  model.eval()
+
+═══════════════════════════════════════════════════════════════════════
 """
 
 with open('cnn_model_info.txt', 'w', encoding='utf-8') as f:
@@ -685,11 +856,150 @@ with open('cnn_model_info.txt', 'w', encoding='utf-8') as f:
 print(model_info)
 print("=> Da luu: cnn_model_info.txt")
 print("="*70)
-print("\n🚀 HOÀN TẤT! Kiểm tra các file output:")
+
+# =============================================================================
+# TRỰC QUAN MEL SPECTROGRAMS
+# =============================================================================
+
+print("\n" + "="*70)
+print("TRUC QUAN MEL SPECTROGRAMS")
+print("="*70)
+
+# Tạo thư mục
+os.makedirs('mel_spectrograms', exist_ok=True)
+
+# Lấy một số samples ngẫu nhiên từ các class khác nhau
+np.random.seed(42)
+n_samples = 8
+sample_indices = np.random.choice(len(df), n_samples, replace=False)
+
+fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+axes = axes.ravel()
+
+print(f"Dang tao {n_samples} mel spectrogram visualizations...")
+
+for idx, sample_idx in enumerate(sample_indices):
+    row = df.iloc[sample_idx]
+    file_path = os.path.join(DATA_PATH, row['filename'])
+    label = row['target']
+    category = row['category']
+    
+    # Load audio
+    y, sr = librosa.load(file_path, sr=22050, duration=5.0)
+    
+    # Tạo mel spectrogram (không normalize để hiển thị đẹp)
+    mel_spec = librosa.feature.melspectrogram(
+        y=y, sr=sr, n_mels=128, n_fft=2048, hop_length=512, fmax=8000
+    )
+    mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+    
+    # Plot
+    img = librosa.display.specshow(
+        mel_spec_db, 
+        sr=sr, 
+        hop_length=512,
+        x_axis='time', 
+        y_axis='mel',
+        ax=axes[idx],
+        cmap='viridis'
+    )
+    
+    axes[idx].set_title(f'{category}\n(Class {label})', fontsize=11, pad=10)
+    axes[idx].set_xlabel('Time (s)', fontsize=9)
+    axes[idx].set_ylabel('Frequency (Hz)', fontsize=9)
+
+plt.suptitle('Mel Spectrogram Examples - Audio "Images"', fontsize=16, y=0.98)
+plt.tight_layout()
+plt.savefig('mel_spectrograms/mel_spectrogram_examples.png', dpi=150, bbox_inches='tight')
+print("=> Da luu: mel_spectrograms/mel_spectrogram_examples.png")
+
+# Tạo visualization chi tiết cho 1 sample
+print("\nTao visualization chi tiet cho 1 sample...")
+sample_row = df.iloc[0]
+file_path = os.path.join(DATA_PATH, sample_row['filename'])
+category = sample_row['category']
+
+y, sr = librosa.load(file_path, sr=22050, duration=5.0)
+
+fig, axes = plt.subplots(3, 1, figsize=(14, 10))
+
+# 1. Waveform
+axes[0].plot(np.linspace(0, len(y)/sr, len(y)), y, linewidth=0.5, color='blue')
+axes[0].set_title(f'1. Audio Waveform - "{category}"', fontsize=12, pad=10)
+axes[0].set_xlabel('Time (s)')
+axes[0].set_ylabel('Amplitude')
+axes[0].grid(True, alpha=0.3)
+
+# 2. Mel Spectrogram (dB)
+mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=8000)
+mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+img = librosa.display.specshow(
+    mel_spec_db, sr=sr, x_axis='time', y_axis='mel', ax=axes[1], cmap='viridis'
+)
+axes[1].set_title('2. Mel Spectrogram (dB) - "Ảnh" của âm thanh', fontsize=12, pad=10)
+axes[1].set_xlabel('Time (s)')
+axes[1].set_ylabel('Frequency (Hz)')
+fig.colorbar(img, ax=axes[1], format='%+2.0f dB')
+
+# 3. Mel Spectrogram normalized (input cho CNN)
+mel_spec_norm = (mel_spec_db - mel_spec_db.min()) / (mel_spec_db.max() - mel_spec_db.min())
+mel_spec_resized = cv2.resize(mel_spec_norm, (128, 128))
+img2 = axes[2].imshow(mel_spec_resized, aspect='auto', origin='lower', cmap='viridis')
+axes[2].set_title('3. Normalized Mel Spectrogram (128×128) - Input cho CNN', fontsize=12, pad=10)
+axes[2].set_xlabel('Time bins')
+axes[2].set_ylabel('Mel frequency bins')
+fig.colorbar(img2, ax=axes[2], label='Normalized value [0-1]')
+
+plt.tight_layout()
+plt.savefig('mel_spectrograms/mel_spectrogram_detailed.png', dpi=150, bbox_inches='tight')
+print("=> Da luu: mel_spectrograms/mel_spectrogram_detailed.png")
+
+# So sánh các class khác nhau
+print("\nTao so sanh mel spectrograms cua cac class...")
+classes_to_compare = ['dog', 'cat', 'rooster', 'rain', 'thunderstorm', 'crackling_fire']
+fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+axes = axes.ravel()
+
+for idx, class_name in enumerate(classes_to_compare):
+    # Tìm sample của class này
+    sample = df[df['category'] == class_name].iloc[0] if class_name in df['category'].values else None
+    
+    if sample is not None:
+        file_path = os.path.join(DATA_PATH, sample['filename'])
+        y, sr = librosa.load(file_path, sr=22050, duration=5.0)
+        
+        mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, fmax=8000)
+        mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+        
+        librosa.display.specshow(
+            mel_spec_db, sr=sr, x_axis='time', y_axis='mel',
+            ax=axes[idx], cmap='viridis'
+        )
+        axes[idx].set_title(f'"{class_name}"', fontsize=12, pad=10, fontweight='bold')
+        axes[idx].set_xlabel('Time (s)', fontsize=9)
+        axes[idx].set_ylabel('Freq (Hz)', fontsize=9)
+    else:
+        axes[idx].text(0.5, 0.5, 'Not found', ha='center', va='center')
+        axes[idx].set_title(f'"{class_name}" (not found)', fontsize=10)
+
+plt.suptitle('So sánh Mel Spectrograms - Mỗi class có "visual signature" riêng', 
+             fontsize=14, y=0.98, fontweight='bold')
+plt.tight_layout()
+plt.savefig('mel_spectrograms/mel_spectrogram_comparison.png', dpi=150, bbox_inches='tight')
+print("=> Da luu: mel_spectrograms/mel_spectrogram_comparison.png")
+
+print("\n=> HOÀN TẤT! Kiểm tra folder 'mel_spectrograms/' để xem:")
+print("   - mel_spectrogram_examples.png (8 samples ngẫu nhiên)")
+print("   - mel_spectrogram_detailed.png (chi tiết 1 sample)")
+print("   - mel_spectrogram_comparison.png (so sánh các class)")
+
+print("\n" + "="*70)
+print("🚀 HOÀN TẤT! Kiểm tra các file output:")
 print("   - best_cnn_model.pth")
 print("   - confusion_matrix_CNN.png")
 print("   - training_history_CNN.png") 
 print("   - predictions_CNN.png")
 print("   - cnn_model_info.txt")
+print("   - mel_spectrograms/ (folder chứa visualizations)")
 print("="*70)
 
