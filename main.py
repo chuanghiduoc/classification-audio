@@ -55,80 +55,156 @@ print("=> Da luu: class_distribution.png")
 # =============================================================================
 
 def extract_advanced_features(file_path, n_mfcc=40, n_mels=128, n_fft=2048, hop_length=512):
-    """Trích xuất đặc trưng âm thanh nâng cao với cải tiến"""
+    """
+    Trích xuất đặc trưng âm thanh nâng cao (handcrafted features)
+    
+    Khác với Deep Learning (CNN/ResNet) tự động học features, ở đây chúng ta phải
+    thiết kế và trích xuất features thủ công dựa trên kiến thức âm thanh học.
+    
+    Args:
+        file_path: Đường dẫn file audio
+        n_mfcc: Số lượng MFCC coefficients (40)
+        n_mels: Số lượng mel bands (128)
+        n_fft: FFT window size (2048)
+        hop_length: Bước nhảy giữa các frames (512)
+    
+    Returns:
+        Feature vector (~400+ dimensions) kết hợp nhiều loại features
+    """
     try:
+        # Load audio với sample rate gốc
         y, sr = librosa.load(file_path, sr=None)
         
-        # MFCC và đạo hàm
+        # ===== 1. MFCC (Mel-Frequency Cepstral Coefficients) =====
+        # Đặc trưng quan trọng nhất cho âm thanh, mô phỏng cách tai người nghe
         mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc, n_fft=n_fft, hop_length=hop_length)
-        mfccs_mean = np.mean(mfccs.T, axis=0)
-        mfccs_std = np.std(mfccs.T, axis=0)
-        mfccs_max = np.max(mfccs.T, axis=0)
-        mfccs_min = np.min(mfccs.T, axis=0)
-        mfccs_skew = np.mean(librosa.feature.delta(mfccs, order=1), axis=1)
-        mfccs_kurtosis = np.mean(librosa.feature.delta(mfccs, order=2), axis=1)
         
-        # Mel Spectrogram với thống kê mở rộng
+        # Thống kê MFCC qua thời gian
+        mfccs_mean = np.mean(mfccs.T, axis=0)      # Trung bình
+        mfccs_std = np.std(mfccs.T, axis=0)        # Độ lệch chuẩn
+        mfccs_max = np.max(mfccs.T, axis=0)        # Giá trị max
+        mfccs_min = np.min(mfccs.T, axis=0)        # Giá trị min
+        
+        # Delta MFCC (đạo hàm bậc 1 và 2) - thể hiện sự thay đổi theo thời gian
+        mfccs_skew = np.mean(librosa.feature.delta(mfccs, order=1), axis=1)     # Velocity
+        mfccs_kurtosis = np.mean(librosa.feature.delta(mfccs, order=2), axis=1) # Acceleration
+        
+        # ===== 2. Mel Spectrogram =====
+        # Biểu diễn năng lượng âm thanh trên thang mel (giống MFCC nhưng không qua DCT)
         mel = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels, n_fft=n_fft, hop_length=hop_length)
-        mel_db = librosa.power_to_db(mel)
-        mel_mean = np.mean(mel_db.T, axis=0)
-        mel_std = np.std(mel_db.T, axis=0)
-        mel_max = np.max(mel_db.T, axis=0)
-        mel_median = np.median(mel_db.T, axis=0)
+        mel_db = librosa.power_to_db(mel)  # Chuyển sang dB
         
-        # Tempogram
+        # Thống kê mel spectrogram (chỉ lấy 20 bands đầu để giảm chiều)
+        mel_mean = np.mean(mel_db.T, axis=0)    # Trung bình
+        mel_std = np.std(mel_db.T, axis=0)      # Độ lệch chuẩn
+        mel_max = np.max(mel_db.T, axis=0)      # Max
+        mel_median = np.median(mel_db.T, axis=0) # Median
+        
+        # ===== 3. Tempogram =====
+        # Thể hiện nhịp điệu, tempo của âm thanh (quan trọng cho nhạc)
         tempogram = librosa.feature.tempogram(y=y, sr=sr)
-        tempo_mean = np.mean(tempogram, axis=1)
+        tempo_mean = np.mean(tempogram, axis=1)  # 10 features
         tempo_std = np.std(tempogram, axis=1)
         
-        # Chroma với thống kê mở rộng
+        # ===== 4. Chroma Features =====
+        # Thể hiện nội dung hòa âm (12 pitch classes: C, C#, D, ...)
+        # Hữu ích cho phân loại nhạc và giọng nói
         chroma = librosa.feature.chroma_stft(y=y, sr=sr, n_fft=n_fft, hop_length=hop_length)
-        chroma_mean = np.mean(chroma, axis=1)
-        chroma_std = np.std(chroma, axis=1)
-        chroma_max = np.max(chroma, axis=1)
+        chroma_mean = np.mean(chroma, axis=1)   # 12 features
+        chroma_std = np.std(chroma, axis=1)     # 12 features
+        chroma_max = np.max(chroma, axis=1)     # 12 features
         
-        # Các đặc trưng phổ
+        # ===== 5. Spectral Features (Đặc trưng phổ) =====
+        # Zero Crossing Rate: Tốc độ signal đổi dấu (cao cho tiếng ồn, thấp cho giọng nói)
         zcr = librosa.feature.zero_crossing_rate(y)
+        
+        # Spectral Centroid: "Trọng tâm" của phổ tần số (bright vs dark sound)
         spectral_centroid = librosa.feature.spectral_centroid(y=y, sr=sr)
+        
+        # Spectral Bandwidth: Độ rộng của phổ (narrow vs wide)
         spectral_bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr)
+        
+        # Spectral Rolloff: Tần số mà dưới đó có 85% năng lượng
         spectral_rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr)
+        
+        # Spectral Contrast: Sự khác biệt giữa peaks và valleys trong phổ
         spectral_contrast = librosa.feature.spectral_contrast(y=y, sr=sr)
+        
+        # Spectral Flatness: Đo độ "ồn" (noise-like vs tone-like)
         spectral_flatness = librosa.feature.spectral_flatness(y=y)
         
-        # RMS và Tonnetz
+        # ===== 6. RMS Energy =====
+        # Root Mean Square: Năng lượng/loudness của signal
         rms = librosa.feature.rms(y=y)
+        
+        # ===== 7. Tonnetz =====
+        # Tonal centroid features (6D) - quan hệ hòa âm
         tonnetz = librosa.feature.tonnetz(y=librosa.effects.harmonic(y), sr=sr)
         
-        # Thêm các đặc trưng mới
+        # ===== 8. Polynomial Features =====
+        # Mô hình hóa xu hướng tần số theo thời gian
         poly_features = librosa.feature.poly_features(y=y, sr=sr, order=1)
         
-        # Kết hợp tất cả đặc trưng
+        # ===== 9. Kết hợp tất cả đặc trưng =====
+        # Tổng cộng: ~400+ features từ các nguồn khác nhau
         features = np.concatenate((
+            # MFCC features: 40*6 = 240 features
             mfccs_mean, mfccs_std, mfccs_max, mfccs_min, mfccs_skew, mfccs_kurtosis,
+            
+            # Mel spectrogram: 20*4 = 80 features (chỉ lấy 20 bands đầu)
             mel_mean[:20], mel_std[:20], mel_max[:20], mel_median[:20],
+            
+            # Tempogram: 10*2 = 20 features
             tempo_mean[:10], tempo_std[:10],
+            
+            # Chroma: 12*3 = 36 features
             chroma_mean, chroma_std, chroma_max,
+            
+            # Spectral features: 3+3+3+3+14+2 = 28 features
             [np.mean(zcr), np.std(zcr), np.max(zcr)],
             [np.mean(spectral_centroid), np.std(spectral_centroid), np.max(spectral_centroid)],
             [np.mean(spectral_bandwidth), np.std(spectral_bandwidth), np.max(spectral_bandwidth)],
             [np.mean(spectral_rolloff), np.std(spectral_rolloff), np.max(spectral_rolloff)],
             np.mean(spectral_contrast, axis=1), np.std(spectral_contrast, axis=1),
             [np.mean(spectral_flatness), np.std(spectral_flatness)],
+            
+            # RMS: 3 features
             [np.mean(rms), np.std(rms), np.max(rms)],
+            
+            # Tonnetz: 6*2 = 12 features
             np.mean(tonnetz, axis=1), np.std(tonnetz, axis=1),
+            
+            # Polynomial: 2 features
             np.mean(poly_features, axis=1)
         ))
         
-        return features
+        return features  # Vector ~400+ chiều
+        
     except Exception as e:
         print(f"Loi: {file_path}: {e}")
         return None
 
 def visualize_audio_features(file_path, save_path):
-    """Trực quan hóa đặc trưng âm thanh"""
+    """
+    Trực quan hóa các đặc trưng âm thanh
+    
+    Tạo 6 plots để hiển thị các features khác nhau từ 1 audio:
+    1. Waveform: Sóng âm gốc
+    2. MFCC: Đặc trưng MFCC (20 coefficients)
+    3. Mel Spectrogram: Phổ tần số trên thang mel
+    4. Chromagram: 12 pitch classes
+    5. Spectral Contrast: Sự tương phản phổ
+    6. Tonnetz: Quan hệ hòa âm
+    
+    Args:
+        file_path: Đường dẫn file audio
+        save_path: Đường dẫn lưu ảnh visualization
+    """
+    # Load audio
     y, sr = librosa.load(file_path, sr=None)
     plt.figure(figsize=(15, 10))
     
+    # Danh sách các features cần visualize
     subplots = [
         ('Waveform', lambda: librosa.display.waveshow(y, sr=sr)),
         ('MFCC', lambda: librosa.display.specshow(librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20), sr=sr, x_axis='time')),
@@ -138,10 +214,11 @@ def visualize_audio_features(file_path, save_path):
         ('Tonnetz', lambda: librosa.display.specshow(librosa.feature.tonnetz(y=librosa.effects.harmonic(y), sr=sr), sr=sr, x_axis='time'))
     ]
     
+    # Vẽ từng subplot
     for i, (title, plot_func) in enumerate(subplots, 1):
         plt.subplot(3, 2, i)
         plot_func()
-        if i > 1:
+        if i > 1:  # Thêm colorbar cho các plot trừ waveform
             plt.colorbar()
         plt.title(title)
     

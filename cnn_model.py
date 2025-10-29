@@ -33,7 +33,7 @@ DATA_PATH = 'data/audio/audio/'
 CSV_PATH = 'data/esc50.csv'
 IMG_SIZE = 128
 APPLY_AUGMENTATION = True  # Data augmentation (time/pitch shift, noise)
-APPLY_SPECAUGMENT = True   # SpecAugment (frequency/time masking)
+APPLY_SPECAUGMENT = True  # SpecAugment (frequency/time masking) 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 print("="*70)
@@ -52,19 +52,21 @@ else:
 
 class SpecAugment:
     """
-    SpecAugment: A Simple Data Augmentation Method for ASR (Google Research)
+    SpecAugment: Phương pháp tăng cường dữ liệu đơn giản cho ASR (Google Research)
     https://arxiv.org/abs/1904.08779
     
-    Applies random masking to frequency and time dimensions of mel spectrogram.
-    This helps reduce overfitting and improve generalization.
+    Áp dụng masking ngẫu nhiên lên các chiều tần số và thời gian của mel spectrogram.
+    Giúp giảm overfitting và cải thiện khả năng tổng quát hóa của mô hình.
     """
     def __init__(self, freq_mask_param=20, time_mask_param=20, n_freq_masks=2, n_time_masks=2):
         """
+        Khởi tạo SpecAugment
+        
         Args:
-            freq_mask_param: Maximum width of frequency mask
-            time_mask_param: Maximum width of time mask
-            n_freq_masks: Number of frequency masks to apply
-            n_time_masks: Number of time masks to apply
+            freq_mask_param: Độ rộng tối đa của frequency mask (số bins tần số)
+            time_mask_param: Độ rộng tối đa của time mask (số frames thời gian)
+            n_freq_masks: Số lượng frequency masks sẽ áp dụng
+            n_time_masks: Số lượng time masks sẽ áp dụng
         """
         self.freq_mask_param = freq_mask_param
         self.time_mask_param = time_mask_param
@@ -73,38 +75,43 @@ class SpecAugment:
     
     def __call__(self, spec):
         """
-        Apply SpecAugment to mel spectrogram
+        Áp dụng SpecAugment lên mel spectrogram
         
         Args:
-            spec: Mel spectrogram array (H, W) or (C, H, W)
+            spec: Mảng mel spectrogram với định dạng (H, W) hoặc (C, H, W)
+                  H = chiều cao (frequency bins)
+                  W = chiều rộng (time frames)
+                  C = channels (thường là 1)
             
         Returns:
-            Augmented mel spectrogram
+            Mel spectrogram đã được augment (có các vùng bị mask = 0)
         """
-        spec = spec.copy()
+        spec = spec.copy()  # Tạo bản sao để không ảnh hưởng dữ liệu gốc
         
-        # Handle both (H, W) and (C, H, W) formats
+        # Xử lý cả định dạng (H, W) và (C, H, W)
         if len(spec.shape) == 3:
-            spec = spec.squeeze(0)  # Remove channel dim if present
+            spec = spec.squeeze(0)  # Bỏ chiều channel nếu có
             had_channel = True
         else:
             had_channel = False
         
         num_freq_bins, num_time_frames = spec.shape
         
-        # Frequency masking
+        # Frequency masking: Che ngẫu nhiên các dải tần số
+        # Giúp model học được các đặc trưng tần số đa dạng hơn
         for _ in range(self.n_freq_masks):
-            f = np.random.randint(0, self.freq_mask_param)
-            f0 = np.random.randint(0, num_freq_bins - f)
-            spec[f0:f0 + f, :] = 0
+            f = np.random.randint(0, self.freq_mask_param)  # Độ rộng mask ngẫu nhiên
+            f0 = np.random.randint(0, num_freq_bins - f)    # Vị trí bắt đầu mask
+            spec[f0:f0 + f, :] = 0  # Set các giá trị trong vùng mask = 0
         
-        # Time masking
+        # Time masking: Che ngẫu nhiên các khung thời gian
+        # Giúp model học được các đặc trưng thời gian đa dạng hơn
         for _ in range(self.n_time_masks):
-            t = np.random.randint(0, self.time_mask_param)
-            t0 = np.random.randint(0, num_time_frames - t)
-            spec[:, t0:t0 + t] = 0
+            t = np.random.randint(0, self.time_mask_param)  # Độ rộng mask ngẫu nhiên
+            t0 = np.random.randint(0, num_time_frames - t)  # Vị trí bắt đầu mask
+            spec[:, t0:t0 + t] = 0  # Set các giá trị trong vùng mask = 0
         
-        # Restore channel dimension if needed
+        # Khôi phục chiều channel nếu ban đầu có
         if had_channel:
             spec = np.expand_dims(spec, axis=0)
         
@@ -116,58 +123,72 @@ class SpecAugment:
 
 def extract_mel_spectrogram(file_path, img_size=128, augment=False):
     """
-    Chuyển audio file → Mel Spectrogram (ảnh 128x128)
+    Trích xuất Mel Spectrogram từ file audio và chuyển thành ảnh 2D
+    
+    Quy trình: Audio (1D) → STFT → Mel filterbank → Log scale → Normalize → Resize → Ảnh 2D
     
     Args:
-        file_path: Đường dẫn file audio
-        img_size: Kích thước ảnh output
-        augment: Có apply augmentation không
+        file_path: Đường dẫn đến file audio (.wav)
+        img_size: Kích thước ảnh output (mặc định 128x128)
+        augment: Nếu True, sẽ tạo thêm 5 phiên bản augmented (tổng 6 ảnh từ 1 audio)
     
     Returns:
-        mel_spec: Array (128, 128) hoặc list of arrays nếu augment=True
+        - Nếu augment=False: Trả về 1 mảng numpy (128, 128)
+        - Nếu augment=True: Trả về list gồm 6 mảng numpy (mỗi mảng 128x128)
+            1. Original (gốc)
+            2. Time stretch slow (chậm 0.9x)
+            3. Time stretch fast (nhanh 1.1x)
+            4. Pitch shift up (+2 bán cung)
+            5. Pitch shift down (-2 bán cung)
+            6. Gaussian noise (thêm nhiễu Gaussian)
     """
     try:
-        # Load audio
+        # Bước 1: Load audio với sample rate 22050 Hz, cắt về 5 giây
+        # sr = sample rate (số mẫu mỗi giây)
+        # y = mảng numpy chứa dữ liệu âm thanh
         y, sr = librosa.load(file_path, sr=22050, duration=5.0)
         
-        # Nếu audio ngắn hơn 5s → pad zeros
+        # Bước 2: Nếu audio ngắn hơn 5s → thêm zeros vào cuối để đủ 5s
+        # Đảm bảo tất cả audio có cùng độ dài cho CNN
         if len(y) < sr * 5:
             y = np.pad(y, (0, sr * 5 - len(y)), mode='constant')
         
-        results = []
+        results = []  # Danh sách lưu các mel spectrogram
         
-        # Original
+        # Bước 3: Tạo mel spectrogram cho audio gốc
         mel_spec = create_mel_spectrogram(y, sr, img_size)
         results.append(mel_spec)
         
-        # Data Augmentation
+        # Bước 4: Data Augmentation - Tạo thêm 5 phiên bản biến thể
+        # Giúp tăng số lượng dữ liệu train, giảm overfitting
         if augment:
-            # 1. Time Stretching (slower)
+            # 1. Time Stretching (chậm lại 0.9x): Giống người nói chậm hơn
             y_slow = librosa.effects.time_stretch(y, rate=0.9)
             mel_spec_slow = create_mel_spectrogram(y_slow, sr, img_size)
             results.append(mel_spec_slow)
             
-            # 2. Time Stretching (faster)
+            # 2. Time Stretching (nhanh lên 1.1x): Giống người nói nhanh hơn
             y_fast = librosa.effects.time_stretch(y, rate=1.1)
             mel_spec_fast = create_mel_spectrogram(y_fast, sr, img_size)
             results.append(mel_spec_fast)
             
-            # 3. Pitch Shifting (+2 semitones)
+            # 3. Pitch Shifting (+2 semitones): Tăng cao độ lên (giọng cao hơn)
             y_pitch_up = librosa.effects.pitch_shift(y, sr=sr, n_steps=2)
             mel_spec_pitch_up = create_mel_spectrogram(y_pitch_up, sr, img_size)
             results.append(mel_spec_pitch_up)
             
-            # 4. Pitch Shifting (-2 semitones)
+            # 4. Pitch Shifting (-2 semitones): Giảm cao độ xuống (giọng thấp hơn)
             y_pitch_down = librosa.effects.pitch_shift(y, sr=sr, n_steps=-2)
             mel_spec_pitch_down = create_mel_spectrogram(y_pitch_down, sr, img_size)
             results.append(mel_spec_pitch_down)
             
-            # 5. Add Gaussian Noise
-            noise = np.random.randn(len(y)) * 0.005
+            # 5. Thêm Gaussian Noise: Mô phỏng nhiễu môi trường (tiếng ồn nền)
+            noise = np.random.randn(len(y)) * 0.005  # Nhiễu nhỏ (σ=0.005)
             y_noise = y + noise
             mel_spec_noise = create_mel_spectrogram(y_noise, sr, img_size)
             results.append(mel_spec_noise)
         
+        # Trả về list nếu augment, hoặc mảng đơn nếu không augment
         return results if augment else results[0]
         
     except Exception as e:
@@ -175,24 +196,41 @@ def extract_mel_spectrogram(file_path, img_size=128, augment=False):
         return None
 
 def create_mel_spectrogram(y, sr, img_size):
-    """Tạo Mel Spectrogram từ audio signal"""
-    # Mel spectrogram
+    """
+    Tạo Mel Spectrogram từ audio signal và chuyển thành ảnh chuẩn hóa
+    
+    Args:
+        y: Audio time series (mảng 1D)
+        sr: Sample rate (Hz)
+        img_size: Kích thước ảnh output (128x128)
+    
+    Returns:
+        Mel spectrogram đã chuẩn hóa về [0,1] với kích thước (img_size, img_size)
+    """
+    # Bước 1: Tính Mel Spectrogram
+    # n_mels=128: Số lượng mel bands (chiều cao của spectrogram)
+    # n_fft=2048: Kích thước FFT window (độ phân giải tần số)
+    # hop_length=512: Số mẫu giữa các frame liên tiếp (độ phân giải thời gian)
+    # fmax=8000: Tần số tối đa cần phân tích (8kHz đủ cho âm thanh môi trường)
     mel_spec = librosa.feature.melspectrogram(
         y=y,
         sr=sr,
-        n_mels=128,
-        n_fft=2048,
-        hop_length=512,
-        fmax=8000
+        n_mels=128,      # 128 mel frequency bands
+        n_fft=2048,      # Window size cho FFT
+        hop_length=512,  # Bước nhảy giữa các window
+        fmax=8000        # Tần số tối đa
     )
     
-    # Convert to log scale (dB)
+    # Bước 2: Chuyển sang thang đo dB (decibel) - thang logarithmic
+    # Giống cách tai người nghe âm thanh (phi tuyến tính)
     mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
     
-    # Normalize to [0, 1]
+    # Bước 3: Chuẩn hóa về khoảng [0, 1]
+    # Giúp CNN học tốt hơn (input trong khoảng chuẩn)
     mel_spec_norm = (mel_spec_db - mel_spec_db.min()) / (mel_spec_db.max() - mel_spec_db.min())
     
-    # Resize to img_size x img_size
+    # Bước 4: Resize về kích thước cố định (128x128)
+    # Đảm bảo tất cả ảnh có cùng kích thước cho CNN
     mel_spec_resized = cv2.resize(mel_spec_norm, (img_size, img_size))
     
     return mel_spec_resized
@@ -307,39 +345,55 @@ y_test = test_labels
 
 class AudioDataset(Dataset):
     """
-    PyTorch Dataset for audio spectrograms with SpecAugment support
+    PyTorch Dataset cho audio spectrograms với hỗ trợ SpecAugment
+    
+    Dataset này tải mel spectrograms và áp dụng SpecAugment trong quá trình training.
+    SpecAugment chỉ áp dụng cho tập train, không áp dụng cho val/test.
     
     Args:
-        spectrograms: Numpy array of mel spectrograms
-        labels: Numpy array of labels
-        apply_specaugment: Whether to apply SpecAugment (only for training)
+        spectrograms: Mảng numpy chứa mel spectrograms, shape: (N, 1, H, W)
+                      N = số lượng samples, H = W = img_size (128)
+        labels: Mảng numpy chứa nhãn (0-49 cho 50 classes)
+        apply_specaugment: True = áp dụng SpecAugment (chỉ dùng cho training)
     """
     def __init__(self, spectrograms, labels, apply_specaugment=False):
-        self.spectrograms = spectrograms  # Keep as numpy for augmentation
-        self.labels = torch.LongTensor(labels)
+        self.spectrograms = spectrograms  # Giữ dạng numpy để augmentation
+        self.labels = torch.LongTensor(labels)  # Chuyển labels sang torch tensor
         self.apply_specaugment = apply_specaugment
         
-        # Initialize SpecAugment if needed
+        # Khởi tạo SpecAugment nếu cần (chỉ cho training)
         if apply_specaugment:
             self.spec_augment = SpecAugment(
-                freq_mask_param=20,  # Max frequency mask width
-                time_mask_param=20,  # Max time mask width
-                n_freq_masks=2,      # Number of frequency masks
-                n_time_masks=2       # Number of time masks
+                freq_mask_param=20,  # Độ rộng tối đa frequency mask (20 bins)
+                time_mask_param=20,  # Độ rộng tối đa time mask (20 frames)
+                n_freq_masks=2,      # Số lượng frequency masks
+                n_time_masks=2       # Số lượng time masks
             )
     
     def __len__(self):
+        """Trả về số lượng samples trong dataset"""
         return len(self.labels)
     
     def __getitem__(self, idx):
-        spec = self.spectrograms[idx].copy()
+        """
+        Lấy 1 sample từ dataset
+        
+        Args:
+            idx: Index của sample cần lấy
+        
+        Returns:
+            spec: Mel spectrogram tensor, shape (1, 128, 128)
+            label: Nhãn (0-49)
+        """
+        spec = self.spectrograms[idx].copy()  # Copy để không ảnh hưởng dữ liệu gốc
         label = self.labels[idx]
         
-        # Apply SpecAugment during training
+        # Áp dụng SpecAugment trong quá trình training
+        # Mỗi lần lấy sample sẽ random mask khác nhau → tăng tính đa dạng
         if self.apply_specaugment:
             spec = self.spec_augment(spec)
         
-        # Convert to tensor
+        # Chuyển sang PyTorch tensor
         spec = torch.FloatTensor(spec)
         
         return spec, label
@@ -377,120 +431,166 @@ print("="*70)
 
 class AudioCNN(nn.Module):
     """
-    CNN Architecture cho Audio Classification (IMPROVED VERSION)
+    CNN Architecture cho Audio Classification (PHIÊN BẢN CẢI TIẾN)
     
-    Architecture:
-        Conv2D(32) -> BN -> ReLU -> Conv2D(32) -> BN -> ReLU -> MaxPool -> Dropout
-        Conv2D(64) -> BN -> ReLU -> Conv2D(64) -> BN -> ReLU -> MaxPool -> Dropout
-        Conv2D(128) -> BN -> ReLU -> Conv2D(128) -> BN -> ReLU -> MaxPool -> Dropout
-        Conv2D(256) -> BN -> ReLU -> Conv2D(256) -> BN -> ReLU -> AdaptiveAvgPool
-        FC(512) -> BatchNorm -> ReLU -> Dropout
-        FC(256) -> BatchNorm -> ReLU -> Dropout
-        FC(50)
+    Kiến trúc: 4 Conv Blocks + 3 Fully Connected Layers
+    
+    Chi tiết từng block:
+        Block 1: Conv(32)→BN→ReLU → Conv(32)→BN→ReLU → MaxPool(2x2) → Dropout(0.2)
+                 Input: 1×128×128 → Output: 32×64×64
+        
+        Block 2: Conv(64)→BN→ReLU → Conv(64)→BN→ReLU → MaxPool(2x2) → Dropout(0.2)
+                 Input: 32×64×64 → Output: 64×32×32
+        
+        Block 3: Conv(128)→BN→ReLU → Conv(128)→BN→ReLU → MaxPool(2x2) → Dropout(0.3)
+                 Input: 64×32×32 → Output: 128×16×16
+        
+        Block 4: Conv(256)→BN→ReLU → Conv(256)→BN→ReLU → AdaptiveAvgPool(1×1) → Dropout(0.3)
+                 Input: 128×16×16 → Output: 256×1×1
+        
+        FC Layers:
+                 FC(256) → BN → ReLU → Dropout(0.4)
+                 FC(128) → BN → ReLU → Dropout(0.3)
+                 FC(50) → Logits
+    
+    Các kỹ thuật được sử dụng:
+        - Batch Normalization: Chuẩn hóa dữ liệu giữa các layers, giúp train nhanh hơn
+        - Dropout: Tắt ngẫu nhiên neurons để giảm overfitting
+        - He Initialization: Khởi tạo weights phù hợp với ReLU activation
+        - Adaptive Average Pooling: Đảm bảo output size cố định bất kể input size
     """
     def __init__(self, num_classes=50):
         super(AudioCNN, self).__init__()
         
-        # Block 1
-        self.conv1_1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-        self.bn1_1 = nn.BatchNorm2d(32)
-        self.conv1_2 = nn.Conv2d(32, 32, kernel_size=3, padding=1)
+        # ===== BLOCK 1: Trích xuất đặc trưng cấp thấp =====
+        # Input: 1×128×128 (1 channel mel spectrogram)
+        self.conv1_1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)   # → 32×128×128
+        self.bn1_1 = nn.BatchNorm2d(32)                              # Chuẩn hóa
+        self.conv1_2 = nn.Conv2d(32, 32, kernel_size=3, padding=1)  # → 32×128×128
         self.bn1_2 = nn.BatchNorm2d(32)
-        self.pool1 = nn.MaxPool2d(2, 2)
-        self.dropout1 = nn.Dropout2d(0.2)
+        self.pool1 = nn.MaxPool2d(2, 2)                              # → 32×64×64 (giảm 1/2)
+        self.dropout1 = nn.Dropout2d(0.2)                            # Dropout 20%
         
-        # Block 2
-        self.conv2_1 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        # ===== BLOCK 2: Đặc trưng cấp trung =====
+        self.conv2_1 = nn.Conv2d(32, 64, kernel_size=3, padding=1)  # → 64×64×64
         self.bn2_1 = nn.BatchNorm2d(64)
-        self.conv2_2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)
+        self.conv2_2 = nn.Conv2d(64, 64, kernel_size=3, padding=1)  # → 64×64×64
         self.bn2_2 = nn.BatchNorm2d(64)
-        self.pool2 = nn.MaxPool2d(2, 2)
+        self.pool2 = nn.MaxPool2d(2, 2)                              # → 64×32×32
         self.dropout2 = nn.Dropout2d(0.2)
         
-        # Block 3
-        self.conv3_1 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        # ===== BLOCK 3: Đặc trưng cấp cao =====
+        self.conv3_1 = nn.Conv2d(64, 128, kernel_size=3, padding=1) # → 128×32×32
         self.bn3_1 = nn.BatchNorm2d(128)
-        self.conv3_2 = nn.Conv2d(128, 128, kernel_size=3, padding=1)
+        self.conv3_2 = nn.Conv2d(128, 128, kernel_size=3, padding=1)# → 128×32×32
         self.bn3_2 = nn.BatchNorm2d(128)
-        self.pool3 = nn.MaxPool2d(2, 2)
-        self.dropout3 = nn.Dropout2d(0.3)
+        self.pool3 = nn.MaxPool2d(2, 2)                              # → 128×16×16
+        self.dropout3 = nn.Dropout2d(0.3)                            # Tăng dropout lên 30%
         
-        # Block 4
-        self.conv4_1 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
+        # ===== BLOCK 4: Đặc trưng semantic (ý nghĩa) =====
+        self.conv4_1 = nn.Conv2d(128, 256, kernel_size=3, padding=1)# → 256×16×16
         self.bn4_1 = nn.BatchNorm2d(256)
-        self.conv4_2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.conv4_2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)# → 256×16×16
         self.bn4_2 = nn.BatchNorm2d(256)
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((1, 1))            # → 256×1×1 (global pooling)
         self.dropout4 = nn.Dropout2d(0.3)
         
-        # Fully connected layers
-        self.fc1 = nn.Linear(256, 256)
+        # ===== FULLY CONNECTED LAYERS: Phân loại =====
+        # Flatten: 256×1×1 → 256
+        self.fc1 = nn.Linear(256, 256)      # Layer 1: 256 neurons
         self.bn_fc1 = nn.BatchNorm1d(256)
-        self.dropout_fc1 = nn.Dropout(0.4)
+        self.dropout_fc1 = nn.Dropout(0.4)  # Dropout cao (40%) để giảm overfitting
         
-        self.fc2 = nn.Linear(256, 128)
+        self.fc2 = nn.Linear(256, 128)      # Layer 2: 128 neurons
         self.bn_fc2 = nn.BatchNorm1d(128)
         self.dropout_fc2 = nn.Dropout(0.3)
         
-        self.fc3 = nn.Linear(128, num_classes)
+        self.fc3 = nn.Linear(128, num_classes)  # Output layer: 50 classes
         
-        # Weight initialization
+        # Khởi tạo weights (He initialization cho ReLU)
         self._init_weights()
     
     def _init_weights(self):
-        """Initialize weights using He initialization for ReLU"""
+        """
+        Khởi tạo weights cho các layers
+        
+        - Conv2D: He initialization (phù hợp với ReLU)
+        - BatchNorm: weight=1, bias=0
+        - Linear: Gaussian với mean=0, std=0.01
+        """
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
+                # He initialization: Tối ưu cho ReLU activation
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm1d):
+                # BatchNorm: scale=1, shift=0
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.Linear):
+                # Fully connected: Gaussian nhỏ
                 nn.init.normal_(m.weight, 0, 0.01)
                 nn.init.constant_(m.bias, 0)
     
     def forward(self, x):
-        # Block 1
-        x = F.relu(self.bn1_1(self.conv1_1(x)))
-        x = F.relu(self.bn1_2(self.conv1_2(x)))
-        x = self.pool1(x)
-        x = self.dropout1(x)
+        """
+        Forward pass: Truyền dữ liệu qua mạng CNN
         
-        # Block 2
+        Args:
+            x: Input tensor, shape (batch_size, 1, 128, 128)
+        
+        Returns:
+            Output logits, shape (batch_size, 50)
+            Chưa qua softmax - sẽ dùng CrossEntropyLoss tính toán
+        """
+        # ===== BLOCK 1: Trích xuất đặc trưng cấp thấp =====
+        # Học các patterns đơn giản: edges, textures
+        x = F.relu(self.bn1_1(self.conv1_1(x)))  # Conv → BN → ReLU
+        x = F.relu(self.bn1_2(self.conv1_2(x)))
+        x = self.pool1(x)                         # Giảm kích thước 1/2
+        x = self.dropout1(x)                      # Regularization
+        
+        # ===== BLOCK 2: Đặc trưng cấp trung =====
+        # Học các patterns phức tạp hơn: shapes, patterns
         x = F.relu(self.bn2_1(self.conv2_1(x)))
         x = F.relu(self.bn2_2(self.conv2_2(x)))
         x = self.pool2(x)
         x = self.dropout2(x)
         
-        # Block 3
+        # ===== BLOCK 3: Đặc trưng cấp cao =====
+        # Học các patterns trừu tượng: objects, structures
         x = F.relu(self.bn3_1(self.conv3_1(x)))
         x = F.relu(self.bn3_2(self.conv3_2(x)))
         x = self.pool3(x)
         x = self.dropout3(x)
         
-        # Block 4
+        # ===== BLOCK 4: Đặc trưng semantic =====
+        # Học ý nghĩa cao nhất: concepts, semantics
         x = F.relu(self.bn4_1(self.conv4_1(x)))
         x = F.relu(self.bn4_2(self.conv4_2(x)))
-        x = self.adaptive_pool(x)
+        x = self.adaptive_pool(x)  # Global pooling → 1×1
         x = self.dropout4(x)
         
-        # Flatten
-        x = x.view(x.size(0), -1)
+        # ===== FLATTEN =====
+        # Chuyển từ 4D (batch, channels, height, width) → 2D (batch, features)
+        x = x.view(x.size(0), -1)  # (batch, 256, 1, 1) → (batch, 256)
         
-        # FC layers
+        # ===== FULLY CONNECTED LAYERS: Phân loại =====
+        # FC1: 256 → 256
         x = self.fc1(x)
         x = self.bn_fc1(x)
         x = F.relu(x)
         x = self.dropout_fc1(x)
         
+        # FC2: 256 → 128
         x = self.fc2(x)
         x = self.bn_fc2(x)
         x = F.relu(x)
         x = self.dropout_fc2(x)
         
-        x = self.fc3(x)
+        # FC3: 128 → 50 (output layer)
+        x = self.fc3(x)  # Logits (chưa qua softmax)
         
         return x
 
@@ -515,45 +615,89 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0
 # =============================================================================
 
 def train_epoch(model, loader, criterion, optimizer, device):
-    """Train for one epoch"""
-    model.train()
+    """
+    Huấn luyện model trong 1 epoch
+    
+    Args:
+        model: Mô hình CNN cần train
+        loader: DataLoader chứa dữ liệu training
+        criterion: Loss function (CrossEntropyLoss)
+        optimizer: Optimizer (Adam)
+        device: 'cuda' hoặc 'cpu'
+    
+    Returns:
+        avg_loss: Loss trung bình của epoch
+        accuracy: Độ chính xác (%) trên tập train
+    """
+    model.train()  # Bật training mode (dropout, batchnorm hoạt động)
     running_loss = 0.0
     correct = 0
     total = 0
     
     pbar = tqdm(loader, desc='Training')
     for inputs, labels in pbar:
+        # Chuyển dữ liệu sang GPU/CPU
         inputs, labels = inputs.to(device), labels.to(device)
         
+        # Bước 1: Xóa gradients cũ
         optimizer.zero_grad()
+        
+        # Bước 2: Forward pass - tính output
         outputs = model(inputs)
+        
+        # Bước 3: Tính loss
         loss = criterion(outputs, labels)
+        
+        # Bước 4: Backward pass - tính gradients
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
+        
+        # Bước 5: Gradient clipping - tránh exploding gradients
+        # Giới hạn norm của gradients ≤ 1.0
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        # Bước 6: Cập nhật weights
         optimizer.step()
         
+        # Thống kê
         running_loss += loss.item()
-        _, predicted = outputs.max(1)
+        _, predicted = outputs.max(1)  # Lấy class có xác suất cao nhất
         total += labels.size(0)
         correct += predicted.eq(labels).sum().item()
         
+        # Hiển thị progress bar với loss và accuracy hiện tại
         pbar.set_postfix({'loss': running_loss/len(loader), 'acc': 100.*correct/total})
     
     return running_loss / len(loader), 100. * correct / total
 
 def validate(model, loader, criterion, device):
-    """Validate the model"""
-    model.eval()
+    """
+    Đánh giá model trên tập validation/test
+    
+    Args:
+        model: Mô hình CNN cần đánh giá
+        loader: DataLoader chứa dữ liệu val/test
+        criterion: Loss function
+        device: 'cuda' hoặc 'cpu'
+    
+    Returns:
+        avg_loss: Loss trung bình
+        accuracy: Độ chính xác (%)
+    """
+    model.eval()  # Bật evaluation mode (dropout tắt, batchnorm dùng running stats)
     running_loss = 0.0
     correct = 0
     total = 0
     
+    # Không tính gradients (tiết kiệm memory và tăng tốc)
     with torch.no_grad():
         for inputs, labels in loader:
             inputs, labels = inputs.to(device), labels.to(device)
+            
+            # Forward pass
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             
+            # Thống kê
             running_loss += loss.item()
             _, predicted = outputs.max(1)
             total += labels.size(0)

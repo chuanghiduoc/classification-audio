@@ -19,22 +19,22 @@ MODEL:
 
 TRAINING STRATEGY:
   - Stage 1: FC layer only (20 epochs)
-    Best Val Acc: 39.69%
+    Best Val Acc: 40.94%
   
-  - Stage 2: Full fine-tuning (33 epochs)
-    Best Val Acc: 86.56%
+  - Stage 2: Full fine-tuning (40 epochs)
+    Best Val Acc: 89.06%
   
-  - Total epochs: 53
+  - Total epochs: 60
   - Optimizer: Adam (Stage 1: lr=0.001, Stage 2: lr=0.0001)
   - Scheduler: ReduceLROnPlateau
   - Early stopping: patience=15
 
 RESULTS:
-  - Train Accuracy: 98.75%
-  - Val Accuracy: 86.56%
-  - Test Accuracy: 86.50%
-  - Improvement vs SVM: +13.44%
-  - Improvement vs CNN: +7.79%
+  - Train Accuracy: 99.38%
+  - Val Accuracy: 89.06%
+  - Test Accuracy: 86.75%
+  - Improvement vs SVM: +13.77%
+  - Improvement vs CNN: +8.10%
 
 FILES:
   ✓ best_resnet18_model.pth

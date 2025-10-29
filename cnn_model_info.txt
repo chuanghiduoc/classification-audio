@@ -16,19 +16,19 @@ MODEL ARCHITECTURE:
   - Regularization: Dropout (0.2-0.4) + BatchNorm + L2 (1e-4)
 
 TRAINING:
-  - Epochs: 100 / 100
-  - Best epoch: 87
+  - Epochs: 88 / 100
+  - Best epoch: 68
   - Batch size: 32
   - Optimizer: Adam (lr=0.001, weight_decay=1e-4)
   - LR Scheduler: ReduceLROnPlateau
   - Early stopping: patience=20
 
 RESULTS:
-  - Train Accuracy: 89.43%
-  - Val Accuracy: 83.44%
-  - Test Accuracy: 0.8100 (81.00%)
+  - Train Accuracy: 95.07%
+  - Val Accuracy: 81.88%
+  - Test Accuracy: 0.7800 (78.00%)
   - Baseline (SVM): 76.25%
-  - Improvement: +6.23%
+  - Improvement: +2.30%
 
 OUTPUT FILES:
   ✓ best_cnn_improved_model.pth (trained weights)

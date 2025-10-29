@@ -34,10 +34,10 @@ LEARNING_RATE = 0.001
 EARLY_STOPPING_PATIENCE = 15
 
 print("="*80)
-print("TRANSFER LEARNING - RESNET18 FOR AUDIO CLASSIFICATION")
+print("TRANSFER LEARNING - RESNET18 CHO PHÂN LOẠI ÂM THANH")
 print("="*80)
-print(f"PyTorch version: {torch.__version__}")
-print(f"Device: {DEVICE}")
+print(f"Phiên bản PyTorch: {torch.__version__}")
+print(f"Thiết bị: {DEVICE}")
 if torch.cuda.is_available():
     print(f"GPU: {torch.cuda.get_device_name(0)}")
 print("="*80)
@@ -47,16 +47,40 @@ print("="*80)
 # =============================================================================
 
 class SpecAugment:
-    """SpecAugment: Frequency & Time Masking for regularization"""
+    """
+    SpecAugment: Frequency & Time Masking cho regularization
+    
+    Kỹ thuật augmentation chuyên cho audio, che ngẫu nhiên các dải tần số và thời gian.
+    Giúp model học robust hơn, không bị phụ thuộc vào một vài tần số/thời điểm cụ thể.
+    """
     def __init__(self, freq_mask_param=25, time_mask_param=25, n_freq_masks=2, n_time_masks=2):
+        """
+        Khởi tạo SpecAugment
+        
+        Args:
+            freq_mask_param: Độ rộng tối đa của frequency mask (25 bins)
+            time_mask_param: Độ rộng tối đa của time mask (25 frames)
+            n_freq_masks: Số lượng frequency masks (2)
+            n_time_masks: Số lượng time masks (2)
+        """
         self.freq_mask_param = freq_mask_param
         self.time_mask_param = time_mask_param
         self.n_freq_masks = n_freq_masks
         self.n_time_masks = n_time_masks
     
     def __call__(self, spec):
+        """
+        Áp dụng SpecAugment lên mel spectrogram
+        
+        Args:
+            spec: Mel spectrogram, shape (H, W) hoặc (1, H, W)
+        
+        Returns:
+            Augmented spectrogram với các vùng bị mask = 0
+        """
         spec = spec.copy()
         
+        # Xử lý cả định dạng 2D và 3D
         if len(spec.shape) == 3:
             spec = spec.squeeze(0)
             had_channel = True
@@ -65,18 +89,20 @@ class SpecAugment:
         
         num_freq_bins, num_time_frames = spec.shape
         
-        # Frequency masking
+        # Frequency masking: Che các dải tần số ngẫu nhiên
+        # Giới hạn độ rộng mask ≤ 1/4 tổng số bins để không mất quá nhiều thông tin
         for _ in range(self.n_freq_masks):
             f = np.random.randint(0, min(self.freq_mask_param, num_freq_bins // 4))
             f0 = np.random.randint(0, num_freq_bins - f)
             spec[f0:f0 + f, :] = 0
         
-        # Time masking
+        # Time masking: Che các khung thời gian ngẫu nhiên
         for _ in range(self.n_time_masks):
             t = np.random.randint(0, min(self.time_mask_param, num_time_frames // 4))
             t0 = np.random.randint(0, num_time_frames - t)
             spec[:, t0:t0 + t] = 0
         
+        # Khôi phục chiều channel nếu cần
         if had_channel:
             spec = np.expand_dims(spec, axis=0)
         
@@ -88,40 +114,65 @@ class SpecAugment:
 
 class AudioDataset(Dataset):
     """
-    PyTorch Dataset for audio spectrograms with SpecAugment
-    Converts 1-channel to 3-channel for ResNet compatibility
+    PyTorch Dataset cho audio spectrograms với SpecAugment
+    
+    Đặc biệt: Chuyển đổi 1-channel (grayscale) → 3-channel (RGB) để tương thích với ResNet
+    ResNet được pretrain trên ImageNet (ảnh RGB), nên cần input 3 channels.
     """
     def __init__(self, spectrograms, labels, apply_specaugment=False):
+        """
+        Khởi tạo Dataset
+        
+        Args:
+            spectrograms: Mảng numpy chứa mel spectrograms, shape (N, 1, H, W)
+            labels: Mảng numpy chứa nhãn (0-49)
+            apply_specaugment: True = áp dụng SpecAugment (chỉ cho training)
+        """
         self.spectrograms = spectrograms
         self.labels = torch.LongTensor(labels)
         self.apply_specaugment = apply_specaugment
         
+        # Khởi tạo SpecAugment nếu cần
         if apply_specaugment:
             self.spec_augment = SpecAugment(
-                freq_mask_param=25,
-                time_mask_param=25,
+                freq_mask_param=25,   # Tăng lên 25 so với CNN (20)
+                time_mask_param=25,   # ResNet mạnh hơn, chịu được augment mạnh hơn
                 n_freq_masks=2,
                 n_time_masks=2
             )
     
     def __len__(self):
+        """Trả về số lượng samples"""
         return len(self.labels)
     
     def __getitem__(self, idx):
+        """
+        Lấy 1 sample từ dataset
+        
+        Args:
+            idx: Index của sample
+        
+        Returns:
+            spec: Tensor 3-channel, shape (3, 128, 128) - tương thích với ResNet
+            label: Nhãn (0-49)
+        """
         spec = self.spectrograms[idx].copy()
         label = self.labels[idx]
         
-        # Apply SpecAugment
+        # Áp dụng SpecAugment nếu đang training
         if self.apply_specaugment:
             spec = self.spec_augment(spec)
         
-        # Convert 1-channel to 3-channel (for ResNet)
-        # ResNet expects RGB images (3 channels)
+        # Chuyển 1-channel → 3-channel để ResNet có thể xử lý
+        # ResNet pretrain trên ImageNet (RGB), cần 3 channels input
         if len(spec.shape) == 3 and spec.shape[0] == 1:
-            spec = np.repeat(spec, 3, axis=0)  # (1, H, W) → (3, H, W)
+            # (1, H, W) → (3, H, W): Nhân đôi channel grayscale thành RGB
+            spec = np.repeat(spec, 3, axis=0)
         elif len(spec.shape) == 2:
-            spec = np.stack([spec, spec, spec], axis=0)  # (H, W) → (3, H, W)
+            # (H, W) → (3, H, W): Stack 3 lần
+            spec = np.stack([spec, spec, spec], axis=0)
         
+        # Chuyển sang PyTorch tensor
         spec = torch.FloatTensor(spec)
         
         return spec, label
@@ -132,49 +183,93 @@ class AudioDataset(Dataset):
 
 class AudioResNet18(nn.Module):
     """
-    ResNet18 adapted for audio classification
+    ResNet18 cho phân loại âm thanh (Transfer Learning từ ImageNet)
     
-    Features:
-    - Pretrained on ImageNet (transfer learning)
-    - Modified first conv layer for grayscale → RGB conversion
-    - Modified final FC layer for 50 classes
-    - Dropout for regularization
+    Ý tưởng chính:
+    - Sử dụng ResNet18 đã pretrain trên ImageNet (1.2M ảnh, 1000 classes)
+    - ResNet đã học được các đặc trưng tổng quát (edges, textures, shapes)
+    - Fine-tune lại cho bài toán phân loại âm thanh (50 classes)
+    
+    Ưu điểm so với CNN từ đầu:
+    - Không cần train từ đầu (tiết kiệm thời gian)
+    - Tận dụng kiến thức từ ImageNet (transfer learning)
+    - Accuracy cao hơn với ít dữ liệu hơn
+    
+    Kiến trúc:
+    - Backbone: ResNet18 (pretrained) - 11.2M parameters
+    - FC layer: Thay đổi từ 1000 classes → 50 classes
+    - Dropout: 0.5 để giảm overfitting
     """
     def __init__(self, num_classes=50, pretrained=True, dropout_rate=0.5):
+        """
+        Khởi tạo AudioResNet18
+        
+        Args:
+            num_classes: Số lượng classes cần phân loại (50 cho ESC-50)
+            pretrained: True = load weights từ ImageNet
+            dropout_rate: Tỷ lệ dropout (0.5 = 50% neurons bị tắt)
+        """
         super(AudioResNet18, self).__init__()
         
-        # Load pretrained ResNet18
+        # Bước 1: Load ResNet18 pretrained từ ImageNet
+        # Tải toàn bộ kiến trúc và weights đã train sẵn
         self.resnet = models.resnet18(pretrained=pretrained)
         
         if pretrained:
-            print("\n✓ Loaded pretrained ResNet18 weights from ImageNet")
+            print("\n✓ Đã tải ResNet18 pretrained từ ImageNet")
         
-        # Modify final fully connected layer
-        num_features = self.resnet.fc.in_features
+        # Bước 2: Thay đổi FC layer cuối
+        # ResNet18 gốc: FC(512 → 1000) cho ImageNet
+        # Cần thay thành: FC(512 → 50) cho ESC-50
+        num_features = self.resnet.fc.in_features  # 512
         self.resnet.fc = nn.Sequential(
-            nn.Dropout(dropout_rate),
-            nn.Linear(num_features, num_classes)
+            nn.Dropout(dropout_rate),              # Dropout để giảm overfitting
+            nn.Linear(num_features, num_classes)   # 512 → 50
         )
         
-        # Initialize new FC layer
+        # Bước 3: Khởi tạo weights cho FC layer mới
+        # Dùng Xavier initialization (tốt cho linear layers)
         nn.init.xavier_uniform_(self.resnet.fc[1].weight)
         nn.init.constant_(self.resnet.fc[1].bias, 0)
     
     def forward(self, x):
+        """
+        Forward pass
+        
+        Args:
+            x: Input tensor, shape (batch_size, 3, 128, 128)
+        
+        Returns:
+            Logits, shape (batch_size, 50)
+        """
         return self.resnet(x)
     
     def freeze_backbone(self):
-        """Freeze all layers except the final FC layer"""
+        """
+        Đóng băng backbone (chỉ train FC layer)
+        
+        Dùng trong Stage 1:
+        - Giữ nguyên weights pretrained của ResNet
+        - Chỉ train FC layer mới
+        - Nhanh hơn, ổn định hơn
+        """
         for name, param in self.resnet.named_parameters():
-            if 'fc' not in name:
-                param.requires_grad = False
-        print("✓ Backbone frozen (only FC layer trainable)")
+            if 'fc' not in name:  # Tất cả layers trừ FC
+                param.requires_grad = False  # Không tính gradients
+        print("✓ Đã đóng băng backbone (chỉ train FC layer)")
     
     def unfreeze_backbone(self):
-        """Unfreeze all layers for fine-tuning"""
+        """
+        Mở băng toàn bộ model (fine-tune tất cả)
+        
+        Dùng trong Stage 2:
+        - Train toàn bộ ResNet (backbone + FC)
+        - Learning rate thấp hơn để không phá hỏng weights pretrained
+        - Accuracy cao hơn nhưng cần cẩn thận với overfitting
+        """
         for param in self.resnet.parameters():
-            param.requires_grad = True
-        print("✓ Backbone unfrozen (full model trainable)")
+            param.requires_grad = True  # Tất cả layers đều train được
+        print("✓ Đã mở băng backbone (train toàn bộ model)")
 
 # =============================================================================
 # LOAD DATA
@@ -224,8 +319,19 @@ except FileNotFoundError:
     print(f"   Val:   {len(val_df)} files")
     print(f"   Test:  {len(test_df)} files")
     
-    # Extract features
+    # Hàm trích xuất features từ dataframe
     def extract_features(df, augment=False):
+        """
+        Trích xuất mel spectrograms từ danh sách audio files
+        
+        Args:
+            df: DataFrame chứa thông tin audio files
+            augment: True = áp dụng data augmentation (6x samples)
+        
+        Returns:
+            spectrograms: Mảng numpy chứa mel spectrograms
+            labels: Mảng numpy chứa nhãn tương ứng
+        """
         spectrograms = []
         labels = []
         
@@ -233,32 +339,38 @@ except FileNotFoundError:
             file_path = os.path.join(DATA_PATH, row['filename'])
             label = row['target']
             
+            # Trích xuất mel spectrogram (có thể có augmentation)
             result = extract_mel_spectrogram(file_path, IMG_SIZE, augment=augment)
             
             if result is not None:
                 if augment:
+                    # Nếu có augmentation, result là list 6 spectrograms
                     for spec in result:
                         spectrograms.append(spec)
                         labels.append(label)
                 else:
+                    # Không augment, chỉ có 1 spectrogram
                     spectrograms.append(result)
                     labels.append(label)
         
         return np.array(spectrograms), np.array(labels)
     
+    # Trích xuất features cho tập TRAIN (có augmentation)
     print("\n[1/3] Extracting TRAIN features (with augmentation)...")
     train_specs, y_train = extract_features(train_df, augment=True)
-    X_train = train_specs.reshape(-1, 1, IMG_SIZE, IMG_SIZE)
+    X_train = train_specs.reshape(-1, 1, IMG_SIZE, IMG_SIZE)  # Reshape về format PyTorch: (N, C, H, W)
     
+    # Trích xuất features cho tập VAL (không augmentation)
     print("\n[2/3] Extracting VAL features...")
     val_specs, y_val = extract_features(val_df, augment=False)
     X_val = val_specs.reshape(-1, 1, IMG_SIZE, IMG_SIZE)
     
+    # Trích xuất features cho tập TEST (không augmentation)
     print("\n[3/3] Extracting TEST features...")
     test_specs, y_test = extract_features(test_df, augment=False)
     X_test = test_specs.reshape(-1, 1, IMG_SIZE, IMG_SIZE)
     
-    # Cache for future use
+    # Lưu vào cache để lần sau không phải trích xuất lại
     os.makedirs('cache', exist_ok=True)
     np.save('cache/X_train.npy', X_train)
     np.save('cache/y_train.npy', y_train)
@@ -281,11 +393,17 @@ print("\n" + "="*80)
 print("CREATING DATASETS & DATALOADERS")
 print("="*80)
 
+# Tạo PyTorch Datasets
+# Train dataset: áp dụng SpecAugment để tăng tính đa dạng
 train_dataset = AudioDataset(X_train, y_train, apply_specaugment=True)
+# Val/Test datasets: không augment để đánh giá chính xác
 val_dataset = AudioDataset(X_val, y_val, apply_specaugment=False)
 test_dataset = AudioDataset(X_test, y_test, apply_specaugment=False)
 
+# Tạo DataLoaders để load data theo batch
+# Train: shuffle=True để tránh model học theo thứ tự
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+# Val/Test: shuffle=False để kết quả đồng nhất
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
 
@@ -302,10 +420,19 @@ print("\n" + "="*80)
 print("BUILDING RESNET18 MODEL")
 print("="*80)
 
+# Khởi tạo model ResNet18 với pretrained weights từ ImageNet
+# Chuyển model sang GPU/CPU tùy theo device có sẵn
 model = AudioResNet18(num_classes=50, pretrained=True, dropout_rate=0.5).to(DEVICE)
 
-# Count parameters
+# Hàm đếm số lượng parameters trong model
 def count_parameters(model):
+    """
+    Đếm tổng số parameters và số parameters trainable
+    
+    Returns:
+        total: Tổng số parameters (bao gồm cả frozen)
+        trainable: Số parameters có thể train (requires_grad=True)
+    """
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
@@ -320,45 +447,76 @@ print(f"Trainable parameters: {trainable_params:,}")
 # =============================================================================
 
 def train_epoch(model, loader, criterion, optimizer, device):
-    """Train for one epoch"""
-    model.train()
+    """
+    Huấn luyện model trong 1 epoch
+    
+    Args:
+        model: AudioResNet18 model
+        loader: DataLoader training data
+        criterion: Loss function (CrossEntropyLoss)
+        optimizer: Optimizer (Adam)
+        device: 'cuda' hoặc 'cpu'
+    
+    Returns:
+        avg_loss: Loss trung bình
+        accuracy: Độ chính xác (%)
+    """
+    model.train()  # Training mode
     running_loss = 0.0
     correct = 0
     total = 0
     
     pbar = tqdm(loader, desc='Training')
     for inputs, labels in pbar:
+        # Chuyển dữ liệu sang device
         inputs, labels = inputs.to(device), labels.to(device)
         
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
+        # Training step
+        optimizer.zero_grad()           # Reset gradients
+        outputs = model(inputs)         # Forward pass
+        loss = criterion(outputs, labels)  # Tính loss
+        loss.backward()                 # Backward pass (tính gradients)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Clip gradients
+        optimizer.step()                # Cập nhật weights
         
+        # Thống kê
         running_loss += loss.item()
         _, predicted = outputs.max(1)
         total += labels.size(0)
         correct += predicted.eq(labels).sum().item()
         
+        # Hiển thị progress
         pbar.set_postfix({'loss': running_loss/len(loader), 'acc': 100.*correct/total})
     
     return running_loss / len(loader), 100. * correct / total
 
 def validate(model, loader, criterion, device):
-    """Validate the model"""
-    model.eval()
+    """
+    Đánh giá model trên tập validation/test
+    
+    Args:
+        model: AudioResNet18 model
+        loader: DataLoader val/test data
+        criterion: Loss function
+        device: 'cuda' hoặc 'cpu'
+    
+    Returns:
+        avg_loss: Loss trung bình
+        accuracy: Độ chính xác (%)
+    """
+    model.eval()  # Evaluation mode (dropout tắt)
     running_loss = 0.0
     correct = 0
     total = 0
     
+    # Không tính gradients để tiết kiệm memory
     with torch.no_grad():
         for inputs, labels in loader:
             inputs, labels = inputs.to(device), labels.to(device)
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             
+            # Thống kê
             running_loss += loss.item()
             _, predicted = outputs.max(1)
             total += labels.size(0)
@@ -376,43 +534,56 @@ print("="*80)
 print("\nStage 1: Train only FC layer (backbone frozen) - 20 epochs")
 print("Stage 2: Fine-tune entire network - 60 epochs")
 
-# Loss and optimizer
+# Loss function: CrossEntropyLoss cho multi-class classification
 criterion = nn.CrossEntropyLoss()
 
 # =============================================================================
 # STAGE 1: TRAIN FC LAYER ONLY
 # =============================================================================
+# Chiến lược: Đóng băng backbone (giữ nguyên pretrained weights)
+#             Chỉ train FC layer mới để adapt cho ESC-50
+#             Giúp tránh phá hỏng features đã học từ ImageNet
 
 print("\n" + "="*80)
 print("STAGE 1: TRAINING FC LAYER (Backbone Frozen)")
 print("="*80)
 
+# Đóng băng tất cả layers trừ FC layer
 model.freeze_backbone()
 
-# Only optimize FC layer
+# Optimizer chỉ optimize các parameters có requires_grad=True (FC layer)
 optimizer_stage1 = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), 
-                               lr=LEARNING_RATE, weight_decay=1e-4)
+                               lr=LEARNING_RATE, weight_decay=1e-4)  # L2 regularization
+
+# Learning rate scheduler: Giảm LR khi val loss không giảm
 scheduler_stage1 = optim.lr_scheduler.ReduceLROnPlateau(optimizer_stage1, mode='min', 
                                                          factor=0.5, patience=5, verbose=True)
 
+# Khởi tạo biến theo dõi
 best_val_acc_stage1 = 0
-patience_counter = 0
+patience_counter = 0  # Đếm số epochs không cải thiện (cho early stopping)
 stage1_epochs = 20
 
+# Lưu lịch sử training
 train_losses_s1 = []
 train_accs_s1 = []
 val_losses_s1 = []
 val_accs_s1 = []
 
+# Training loop cho Stage 1
 for epoch in range(stage1_epochs):
     print(f"\n[Stage 1] Epoch {epoch+1}/{stage1_epochs}")
     print("-" * 80)
     
+    # Train 1 epoch
     train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer_stage1, DEVICE)
+    # Validate
     val_loss, val_acc = validate(model, val_loader, criterion, DEVICE)
     
+    # Cập nhật learning rate nếu val loss không giảm
     scheduler_stage1.step(val_loss)
     
+    # Lưu lịch sử
     train_losses_s1.append(train_loss)
     train_accs_s1.append(train_acc)
     val_losses_s1.append(val_loss)
@@ -421,6 +592,7 @@ for epoch in range(stage1_epochs):
     print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
     print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
     
+    # Lưu model nếu val accuracy cải thiện
     if val_acc > best_val_acc_stage1:
         best_val_acc_stage1 = val_acc
         torch.save(model.state_dict(), 'best_resnet_stage1.pth')
@@ -429,6 +601,7 @@ for epoch in range(stage1_epochs):
     else:
         patience_counter += 1
     
+    # Early stopping: Dừng nếu không cải thiện sau 10 epochs
     if patience_counter >= 10:
         print(f"\nEarly stopping triggered in Stage 1 after {epoch+1} epochs")
         break
@@ -439,38 +612,49 @@ print(f"   Best validation accuracy: {best_val_acc_stage1:.2f}%")
 # =============================================================================
 # STAGE 2: FINE-TUNE ENTIRE NETWORK
 # =============================================================================
+# Chiến lược: Mở băng toàn bộ model (backbone + FC)
+#             Train với learning rate thấp hơn để không phá hỏng pretrained weights
+#             Fine-tune toàn bộ để adapt tốt hơn cho audio classification
 
 print("\n" + "="*80)
 print("STAGE 2: FINE-TUNING ENTIRE NETWORK")
 print("="*80)
 
-# Load best model from stage 1
+# Load model tốt nhất từ Stage 1
 model.load_state_dict(torch.load('best_resnet_stage1.pth'))
+# Mở băng toàn bộ backbone để train được
 model.unfreeze_backbone()
 
-# Lower learning rate for fine-tuning
+# Learning rate thấp hơn (1/10) để fine-tune cẩn thận, tránh phá hỏng weights
 optimizer_stage2 = optim.Adam(model.parameters(), lr=LEARNING_RATE/10, weight_decay=1e-4)
+# Patience cao hơn (7) vì fine-tune cần thời gian
 scheduler_stage2 = optim.lr_scheduler.ReduceLROnPlateau(optimizer_stage2, mode='min', 
                                                          factor=0.5, patience=7, verbose=True)
 
+# Khởi tạo từ kết quả Stage 1
 best_val_acc_stage2 = best_val_acc_stage1
 patience_counter = 0
 stage2_epochs = 60
 
+# Lưu lịch sử training Stage 2
 train_losses_s2 = []
 train_accs_s2 = []
 val_losses_s2 = []
 val_accs_s2 = []
 
+# Training loop cho Stage 2
 for epoch in range(stage2_epochs):
     print(f"\n[Stage 2] Epoch {epoch+1}/{stage2_epochs}")
     print("-" * 80)
     
+    # Train toàn bộ model
     train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer_stage2, DEVICE)
     val_loss, val_acc = validate(model, val_loader, criterion, DEVICE)
     
+    # Cập nhật learning rate
     scheduler_stage2.step(val_loss)
     
+    # Lưu lịch sử
     train_losses_s2.append(train_loss)
     train_accs_s2.append(train_acc)
     val_losses_s2.append(val_loss)
@@ -479,6 +663,7 @@ for epoch in range(stage2_epochs):
     print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
     print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
     
+    # Lưu model nếu val accuracy cải thiện
     if val_acc > best_val_acc_stage2:
         best_val_acc_stage2 = val_acc
         torch.save(model.state_dict(), 'best_resnet18_model.pth')
@@ -487,6 +672,7 @@ for epoch in range(stage2_epochs):
     else:
         patience_counter += 1
     
+    # Early stopping với patience=15
     if patience_counter >= EARLY_STOPPING_PATIENCE:
         print(f"\nEarly stopping triggered in Stage 2 after {epoch+1} epochs")
         break
@@ -494,7 +680,7 @@ for epoch in range(stage2_epochs):
 print(f"\n=> Stage 2 completed!")
 print(f"   Best validation accuracy: {best_val_acc_stage2:.2f}%")
 
-# Combine training history
+# Kết hợp lịch sử training từ cả 2 stages
 train_losses = train_losses_s1 + train_losses_s2
 train_accs = train_accs_s1 + train_accs_s2
 val_losses = val_losses_s1 + val_losses_s2
@@ -508,27 +694,29 @@ print("\n" + "="*80)
 print("EVALUATING ON TEST SET")
 print("="*80)
 
-# Load best model
+# Load model tốt nhất (từ Stage 2)
 model.load_state_dict(torch.load('best_resnet18_model.pth'))
-model.eval()
+model.eval()  # Chuyển sang evaluation mode
 
-# Predict on test set
+# Dự đoán trên tập test
 all_preds = []
 all_labels = []
 
-with torch.no_grad():
+with torch.no_grad():  # Không tính gradients để tiết kiệm memory
     for inputs, labels in tqdm(test_loader, desc='Testing'):
         inputs = inputs.to(DEVICE)
-        outputs = model(inputs)
-        _, predicted = outputs.max(1)
+        outputs = model(inputs)  # Forward pass
+        _, predicted = outputs.max(1)  # Lấy class có xác suất cao nhất
         
+        # Lưu kết quả
         all_preds.extend(predicted.cpu().numpy())
         all_labels.extend(labels.numpy())
 
+# Chuyển sang numpy arrays
 y_pred = np.array(all_preds)
 y_true = np.array(all_labels)
 
-# Calculate accuracy
+# Tính accuracy trên tập test
 accuracy = accuracy_score(y_true, y_pred)
 print(f"\n=> TEST ACCURACY: {accuracy:.4f} ({accuracy*100:.2f}%)")
 print(f"   Correct: {np.sum(y_pred == y_true)}/{len(y_true)}")
@@ -537,7 +725,7 @@ print(f"   Correct: {np.sum(y_pred == y_true)}/{len(y_true)}")
 print("\nClassification Report:")
 print(classification_report(y_true, y_pred))
 
-# Confusion matrix
+# Vẽ Confusion Matrix để xem model nhầm lẫn giữa các classes nào
 plt.figure(figsize=(12, 10))
 cm = confusion_matrix(y_true, y_pred)
 sns.heatmap(cm, annot=False, fmt='d', cmap='Blues', cbar=True)
@@ -594,6 +782,10 @@ print(f"Best Val Accuracy: {val_accs[best_epoch_idx]:.2f}%")
 # =============================================================================
 # MODEL COMPARISON
 # =============================================================================
+# So sánh ResNet18 với các approaches khác:
+# - SVM (Traditional ML): Handcrafted features
+# - CNN (Custom): Deep learning từ đầu
+# - ResNet18: Transfer learning
 
 print("\n" + "="*80)
 print("MODEL COMPARISON")
@@ -609,6 +801,7 @@ comparison = {
 comparison_df = pd.DataFrame(comparison)
 print(comparison_df.to_string(index=False))
 
+# Tính mức độ cải thiện so với các baseline
 improvement_vs_svm = (accuracy - 0.7625) / 0.7625 * 100
 improvement_vs_cnn = (accuracy - 0.8025) / 0.8025 * 100
 
@@ -616,6 +809,7 @@ print(f"\n=> Improvement:")
 print(f"   vs SVM: +{improvement_vs_svm:.2f}% ({0.7625*100:.2f}% → {accuracy*100:.2f}%)")
 print(f"   vs CNN: +{improvement_vs_cnn:.2f}% ({0.8025*100:.2f}% → {accuracy*100:.2f}%)")
 
+# Đánh giá kết quả
 if accuracy >= 0.85:
     print(f"\n🎉 MỤC TIÊU ĐẠT ĐƯỢC: 85%+!")
     if accuracy >= 0.90:
